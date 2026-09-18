@@ -26,3 +26,16 @@ export const burnCpu = action({
     return x > 0;
   },
 });
+
+// Bumps counter `marker` once (via a committed mutation), then burns CPU, so a
+// test can tell whether the action ran more than once.
+export const markedBurn = action({
+  args: { marker: v.string(), ms: v.number() },
+  handler: async (ctx, { marker, ms }): Promise<boolean> => {
+    await ctx.runMutation(api.messages.increment, { name: marker });
+    const end = Date.now() + ms;
+    let x = 0;
+    while (Date.now() < end) x += Math.sqrt(x + 1);
+    return x > 0;
+  },
+});

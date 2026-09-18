@@ -31,7 +31,7 @@ for cfg in ${@:-local direct proxy}; do
   # The conductor always creates some while deploying (push-time analyze runs locally).
   isolates() { compose logs "$1" | grep -c 'isolate worker' || true; }
   conductor_before=$(isolates conductor)
-  $pm test
+  $pm test tests/equivalence.test.ts
   conductor_isolates=$(isolates conductor)
   worker_isolates=$(isolates worker)
   echo "isolate creations: conductor=$conductor_isolates (at deploy: $conductor_before) workers=$worker_isolates"
