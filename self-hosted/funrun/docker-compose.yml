@@ -83,6 +83,7 @@ services:
       <<: *common-env
       FUNCTION_HOST_URL: http://conductor:7401
       FUNRUN_LISTEN: 0.0.0.0:7400
+      FUNRUN_METRICS_LISTEN: 0.0.0.0:9100
     depends_on: [conductor]
     deploy: { resources: { limits: { cpus: "${WORKER_CPUS:-4}" } } }
 

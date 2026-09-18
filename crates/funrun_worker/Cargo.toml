@@ -30,6 +30,7 @@ metrics = { workspace = true }
 model = { workspace = true }
 pb = { workspace = true }
 pb_funrun = { workspace = true }
+performance_stats = { workspace = true }
 reqwest = { workspace = true }
 runtime = { workspace = true }
 search = { workspace = true }

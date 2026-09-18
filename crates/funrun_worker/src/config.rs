@@ -14,4 +14,7 @@ pub struct WorkerConfig {
     pub instance_secret: String,
     #[clap(long, env = "CONVEX_HTTP_PROXY")]
     pub convex_http_proxy: Option<url::Url>,
+    /// If set, serve Prometheus metrics on `http://<addr>/metrics`.
+    #[clap(long, env = "FUNRUN_METRICS_LISTEN")]
+    pub metrics_listen: Option<std::net::SocketAddr>,
 }

@@ -4191,6 +4191,7 @@ dependencies = [
  "model",
  "pb",
  "pb_funrun",
+ "performance_stats",
  "reqwest",
  "runtime",
  "search",
