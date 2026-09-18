@@ -1,5 +1,7 @@
 import { mutation, query, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
+import { paginationOptsValidator, PaginationResult } from "convex/server";
+import { Doc } from "./_generated/dataModel";
 
 export const send = mutation({
   args: { author: v.string(), body: v.string() },
@@ -10,6 +12,16 @@ export const byAuthor = query({
   args: { author: v.string() },
   handler: async (ctx, { author }) =>
     ctx.db.query("messages").withIndex("by_author", (q) => q.eq("author", author)).collect(),
+});
+
+export const byAuthorPage = query({
+  args: { author: v.string(), paginationOpts: paginationOptsValidator },
+  // Explicit return type breaks the api -> byAuthorPage -> api type cycle (TS7022).
+  handler: async (ctx, { author, paginationOpts }): Promise<PaginationResult<Doc<"messages">>> =>
+    ctx.db
+      .query("messages")
+      .withIndex("by_author", (q) => q.eq("author", author))
+      .paginate(paginationOpts),
 });
 
 export const increment = mutation({

@@ -17,6 +17,18 @@ export const roundTrip = action({
   },
 });
 
+// Stores `text` as a blob and returns a fetchable URL for it (R? file
+// storage over HTTP compat check).
+export const storeText = action({
+  args: { text: v.string() },
+  handler: async (ctx, { text }): Promise<string> => {
+    const id = await ctx.storage.store(new Blob([text]));
+    const url = await ctx.storage.getUrl(id);
+    if (url === null) throw new Error("storage url missing");
+    return url;
+  },
+});
+
 export const burnCpu = action({
   args: { ms: v.number() },
   handler: async (_ctx, { ms }) => {

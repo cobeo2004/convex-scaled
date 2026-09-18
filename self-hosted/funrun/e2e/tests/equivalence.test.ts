@@ -1,5 +1,7 @@
 import { ConvexHttpClient, ConvexClient } from "convex/browser";
+import type { PaginationResult } from "convex/server";
 import { api } from "../convex/_generated/api";
+import type { Doc } from "../convex/_generated/dataModel";
 import { describe, expect, test } from "vitest";
 import { randomBytes } from "node:crypto";
 
@@ -42,6 +44,37 @@ describe(`funrun equivalence (${process.env.FUNCTION_RUNNER ?? "unknown"})`, () 
     await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toBe(1);
     unsub();
     await client.close();
+  });
+
+  test("pagination: page through N=7 rows by 3 until done", async () => {
+    const author = `page-${run}`;
+    const bodies = Array.from({ length: 7 }, (_, i) => `p${i}`);
+    for (const body of bodies) {
+      await http.mutation(api.messages.send, { author, body });
+    }
+    let cursor: string | null = null;
+    const pageSizes: number[] = [];
+    const seen: string[] = [];
+    for (;;) {
+      const page: PaginationResult<Doc<"messages">> = await http.query(api.messages.byAuthorPage, {
+        author,
+        paginationOpts: { numItems: 3, cursor },
+      });
+      pageSizes.push(page.page.length);
+      seen.push(...page.page.map((r) => r.body));
+      if (page.isDone) break;
+      cursor = page.continueCursor;
+    }
+    expect(pageSizes).toEqual([3, 3, 1]);
+    expect(seen).toEqual(bodies);
+  });
+
+  test("file storage over HTTP: exact bytes", async () => {
+    const text = `blob-${run}-${randomBytes(8).toString("hex")}`;
+    const url = await http.action(api.actions.storeText, { text });
+    const res = await fetch(url);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(text);
   });
 
   test("text search", async () => {
