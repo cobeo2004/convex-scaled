@@ -420,21 +420,16 @@ async fn execute_once(
     mut http_response: Option<&mut HttpActionResponseStreamer>,
     http_body: &mut Option<BodyStream>,
 ) -> anyhow::Result<Result<RunResult, AttemptFailure>> {
+    // Open the call with an empty request stream and send the RunRequest only
+    // once the worker answered with headers (it does so without waiting for
+    // the first frame). A failed call therefore never delivered it.
     let (up_tx, up_rx) = mpsc::channel(8);
-    up_tx
-        .send(ExecuteUp {
-            inner: Some(Up::Request(request)),
-        })
-        .await
-        .context("request stream closed")?;
-    // Held until the body pump takes it, so the request half stays open.
-    let mut up_tx = Some(up_tx);
     let mut req = tonic::Request::new(ReceiverStream::new(up_rx));
     req.metadata_mut().insert(MODULE_HEADER, module);
     req.set_timeout(*FUNRUN_RUN_FUNCTION_TIMEOUT);
     let mut down = match client.execute(req).await {
         Ok(response) => response.into_inner(),
-        // The call failed before the worker took the RunRequest.
+        // The worker never received the RunRequest: it is not sent yet.
         Err(status) if is_transport_failure(&status) => {
             let stage = failure_stage(udf_type, false, false, false);
             return Ok(Err(AttemptFailure {
@@ -444,6 +439,19 @@ async fn execute_once(
         },
         Err(status) => return Err(status.into_anyhow()),
     };
+    let request = ExecuteUp {
+        inner: Some(Up::Request(request)),
+    };
+    // A failed send means the call already ended and the RunRequest was not
+    // handed to it, so nothing was sent (`request_sent = false`).
+    if up_tx.send(request).await.is_err() {
+        return Ok(Err(AttemptFailure {
+            stage: failure_stage(udf_type, false, false, false),
+            error: anyhow::anyhow!("funrun Execute stream closed before the RunRequest was sent"),
+        }));
+    }
+    // Held until the body pump takes it, so the request half stays open.
+    let mut up_tx = Some(up_tx);
     let client_gone = http_response.as_ref().map(|s| s.sender.clone());
     let mut pump: Option<BoxFuture<'static, ()>> = None;
     // Flips only on the worker's `Started`. Actions count as started even
@@ -560,9 +568,13 @@ mod tests {
         grpc::ConvexGrpcService,
         types::UdfType,
     };
-    use futures::stream::BoxStream;
+    use futures::{
+        stream::BoxStream,
+        StreamExt,
+    };
     use pb_funrun::funrun::{
         execute_down::Inner as Down,
+        execute_up::Inner as Up,
         funrun_server::{
             Funrun,
             FunrunServer,
@@ -595,12 +607,26 @@ mod tests {
 
     type Frame = Result<Down, Status>;
 
-    /// Reads the RunRequest, answers the n-th Execute call (from 0) with
-    /// `script(n)`, then ends the stream.
+    /// `Ok(frames)`: answer with headers at once, like the real worker, then
+    /// read the RunRequest and send `frames`. `Err(status)`: reject the call.
+    type Script = fn(usize) -> Result<Vec<Frame>, Status>;
+
+    /// Answers the n-th Execute call (from 0) with `script(n)`, counting calls
+    /// and RunRequests received.
     #[derive(Clone)]
     struct FakeWorker {
         calls: Arc<AtomicUsize>,
-        script: fn(usize) -> Vec<Frame>,
+        requests: Arc<AtomicUsize>,
+        script: Script,
+    }
+
+    async fn read_request(up: &mut Streaming<ExecuteUp>, requests: &AtomicUsize) {
+        if let Ok(Some(ExecuteUp {
+            inner: Some(Up::Request(_)),
+        })) = up.message().await
+        {
+            requests.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[tonic::async_trait]
@@ -613,11 +639,31 @@ mod tests {
             request: Request<Streaming<ExecuteUp>>,
         ) -> Result<Response<Self::ExecuteStream>, Status> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            request.into_inner().message().await?;
-            let frames = (self.script)(call)
-                .into_iter()
-                .map(|frame| frame.map(|inner| ExecuteDown { inner: Some(inner) }));
-            Ok(Response::new(Box::pin(futures::stream::iter(frames))))
+            let mut up = request.into_inner();
+            let requests = self.requests.clone();
+            match (self.script)(call) {
+                Err(status) => {
+                    // Give a RunRequest sent before the headers time to land.
+                    _ = tokio::time::timeout(
+                        Duration::from_millis(200),
+                        read_request(&mut up, &requests),
+                    )
+                    .await;
+                    Err(status)
+                },
+                Ok(frames) => {
+                    let frames: Vec<_> = frames
+                        .into_iter()
+                        .map(|frame| frame.map(|inner| ExecuteDown { inner: Some(inner) }))
+                        .collect();
+                    let stream = futures::stream::once(async move {
+                        read_request(&mut up, &requests).await;
+                        futures::stream::iter(frames)
+                    })
+                    .flatten();
+                    Ok(Response::new(Box::pin(stream)))
+                },
+            }
         }
 
         async fn watch_load(
@@ -628,10 +674,15 @@ mod tests {
         }
     }
 
-    async fn start_fake(script: fn(usize) -> Vec<Frame>) -> (String, Arc<AtomicUsize>) {
-        let calls = Arc::new(AtomicUsize::new(0));
+    async fn start_fake(script: Script) -> (String, Arc<AtomicUsize>) {
+        let (addr, fake) = start_fake_worker(script).await;
+        (addr, fake.calls)
+    }
+
+    async fn start_fake_worker(script: Script) -> (String, FakeWorker) {
         let fake = FakeWorker {
-            calls: calls.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(AtomicUsize::new(0)),
             script,
         };
         let socket = TcpSocket::new_v4().unwrap();
@@ -639,7 +690,7 @@ mod tests {
         let addr = socket.local_addr().unwrap();
         tokio::spawn(
             ConvexGrpcService::new()
-                .add_service(FunrunServer::new(fake))
+                .add_service(FunrunServer::new(fake.clone()))
                 .serve(socket, std::future::pending()),
         );
         // The client channel is lazy and does not retry a refused first dial.
@@ -650,7 +701,7 @@ mod tests {
         })
         .await
         .unwrap();
-        (addr.to_string(), calls)
+        (addr.to_string(), fake)
     }
 
     fn pool_of(addrs: &[&str]) -> Arc<WorkerPool> {
@@ -678,32 +729,36 @@ mod tests {
         .await
     }
 
-    fn overloaded(_: usize) -> Vec<Frame> {
-        vec![Ok(Down::Overloaded(Overloaded {
+    fn overloaded(_: usize) -> Result<Vec<Frame>, Status> {
+        Ok(vec![Ok(Down::Overloaded(Overloaded {
             reason: "full".into(),
-        }))]
+        }))])
     }
 
-    fn succeeds(_: usize) -> Vec<Frame> {
-        vec![
+    fn succeeds(_: usize) -> Result<Vec<Frame>, Status> {
+        Ok(vec![
             Ok(Down::Started(Started {})),
             Ok(Down::Result(RunResult::default())),
-        ]
+        ])
     }
 
-    fn drops_after_start(_: usize) -> Vec<Frame> {
-        vec![Ok(Down::Started(Started {}))]
+    fn drops_after_start(_: usize) -> Result<Vec<Frame>, Status> {
+        Ok(vec![Ok(Down::Started(Started {}))])
     }
 
-    fn drops_before_start(_: usize) -> Vec<Frame> {
-        vec![]
+    fn drops_before_start(_: usize) -> Result<Vec<Frame>, Status> {
+        Ok(vec![])
     }
 
-    fn fails_precondition(_: usize) -> Vec<Frame> {
-        vec![Err(Status::failed_precondition("wrong deployment"))]
+    fn fails_precondition(_: usize) -> Result<Vec<Frame>, Status> {
+        Ok(vec![Err(Status::failed_precondition("wrong deployment"))])
     }
 
-    fn drops_after_start_then_succeeds(call: usize) -> Vec<Frame> {
+    fn rejects_call(_: usize) -> Result<Vec<Frame>, Status> {
+        Err(Status::unavailable("worker going away"))
+    }
+
+    fn drops_after_start_then_succeeds(call: usize) -> Result<Vec<Frame>, Status> {
         if call == 0 {
             drops_after_start(call)
         } else {
@@ -755,6 +810,19 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_call_never_delivered_the_run_request() {
+        let (addr, fake) = start_fake_worker(rejects_call).await;
+        let pool = pool_of(&[&addr]);
+
+        let err = run(&pool, "m.js", UdfType::Action).await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("worker going away"), "{err:#}");
+        // Nothing was delivered, so every attempt was safe to retry.
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]
