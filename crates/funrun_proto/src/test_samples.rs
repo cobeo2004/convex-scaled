@@ -4,37 +4,78 @@ use std::{
 };
 
 use common::{
+    bootstrap_model::index::database_index::IndexedFields,
+    document::{
+        CreationTime,
+        PackedDocument,
+        ResolvedDocument,
+    },
     execution_context::{
         ExecutionContext,
         ExecutionId,
         RequestId,
         RequestMetadata,
     },
+    identity::InertIdentity,
+    interval::{
+        BinaryKey,
+        Interval,
+        IntervalSet,
+    },
+    query::FilterValue,
     query_journal::QueryJournal,
+    runtime::UnixTimestamp,
     types::{
         ConvexOrigin,
         DeploymentClass,
         DeploymentMetadata,
         EnvVarName,
         EnvVarValue,
+        IndexDescriptor,
         IndexId,
         IndexRef,
         PersistenceIndexId,
         RepeatableReason,
         RepeatableTimestamp,
+        TabletIndexName,
         Timestamp,
         UdfType,
     },
 };
-use database::BootstrapMetadata;
+use database::{
+    reads::IndexReads,
+    BootstrapMetadata,
+    ReadSet,
+    TransactionReadSize,
+};
 use function_runner::{
     server::FunctionMetadata,
+    FunctionFinalTransaction,
+    FunctionReads,
     FunctionWrites,
 };
 use keybroker::Identity;
-use udf::validation::ValidatedPathAndArgs;
+use search::{
+    query::TextQueryTerm,
+    FilterConditionRead,
+    QueryReads,
+    TextQueryTermRead,
+};
+use udf::{
+    validation::ValidatedPathAndArgs,
+    FunctionOutcome,
+    SyscallTrace,
+};
+use usage_tracking::FunctionUsageStats;
 use value::{
+    ConvexObject,
+    ConvexValue,
+    DeveloperDocumentId,
+    FieldName,
+    FieldPath,
     InternalId,
+    ResolvedDocumentId,
+    TableNumber,
     TabletId,
 };
 
@@ -112,4 +153,137 @@ pub fn sample_run_request_parts() -> RunRequestParts {
         convex_origin: ConvexOrigin::from("http://127.0.0.1:3210"),
         subfunctions_in_same_isolate: true,
     }
+}
+
+pub fn sample_tablet() -> TabletId {
+    TabletId(InternalId::from([6u8; 16]))
+}
+
+fn field_path(name: &str) -> FieldPath {
+    FieldPath::new(vec![name.parse().unwrap()]).unwrap()
+}
+
+/// One indexed read (reserved `by_creation_time`, two intervals covering keys
+/// prefixed 0x01 and 0x05) and one search read (non-reserved `search_body`).
+pub fn sample_read_set() -> ReadSet {
+    let mut intervals = IntervalSet::new();
+    intervals.add(Interval::prefix(BinaryKey::from(vec![1u8])));
+    intervals.add(Interval::prefix(BinaryKey::from(vec![5u8])));
+    let indexed = BTreeMap::from([(
+        TabletIndexName::by_creation_time(sample_tablet()),
+        IndexReads {
+            fields: IndexedFields::creation_time(),
+            intervals,
+            stack_traces: None,
+        },
+    )]);
+    let search_reads = QueryReads::new(
+        vec![
+            TextQueryTermRead::new(field_path("body"), TextQueryTerm::Exact("hello".into())),
+            TextQueryTermRead::new(field_path("body"), TextQueryTerm::Prefix("wor".into())),
+        ]
+        .into(),
+        vec![FilterConditionRead::Must(
+            field_path("author"),
+            FilterValue::from_search_value(Some(&ConvexValue::try_from("alice").unwrap())),
+        )]
+        .into(),
+    );
+    let search = BTreeMap::from([(
+        TabletIndexName::new(
+            sample_tablet(),
+            IndexDescriptor::new("search_body").unwrap(),
+        )
+        .unwrap(),
+        search_reads,
+    )]);
+    ReadSet::new(indexed, search)
+}
+
+/// A document in `sample_tablet()` with the given `author` and `body` fields.
+pub fn sample_document(author: &str, body: &str) -> PackedDocument {
+    let id = ResolvedDocumentId {
+        tablet_id: sample_tablet(),
+        developer_id: DeveloperDocumentId::new(
+            TableNumber::try_from(10001u32).unwrap(),
+            InternalId::from([7u8; 16]),
+        ),
+    };
+    let value = ConvexObject::try_from(BTreeMap::from([
+        (
+            "author".parse::<FieldName>().unwrap(),
+            ConvexValue::try_from(author).unwrap(),
+        ),
+        (
+            "body".parse::<FieldName>().unwrap(),
+            ConvexValue::try_from(body).unwrap(),
+        ),
+    ]))
+    .unwrap();
+    PackedDocument::pack(
+        &ResolvedDocument::new(id, CreationTime::try_from(1.0).unwrap(), value).unwrap(),
+    )
+}
+
+pub fn sample_final_transaction() -> FunctionFinalTransaction {
+    FunctionFinalTransaction {
+        begin_timestamp: Timestamp::try_from(1_000u64).unwrap(),
+        reads: FunctionReads {
+            reads: sample_read_set(),
+            num_intervals: 2,
+            user_tx_size: TransactionReadSize {
+                total_document_size: 300,
+                total_document_count: 3,
+            },
+            system_tx_size: TransactionReadSize {
+                total_document_size: 40,
+                total_document_count: 1,
+            },
+        },
+        writes: FunctionWrites::default(),
+        rows_read_by_tablet: BTreeMap::from([(sample_tablet(), 3)]),
+    }
+}
+
+pub fn sample_query_result() -> (
+    FunctionFinalTransaction,
+    FunctionOutcome,
+    FunctionUsageStats,
+    ValidatedPathAndArgs,
+    InertIdentity,
+) {
+    let udf_outcome = pb::outcome::UdfOutcome {
+        rng_seed: Some(vec![0u8; 32]),
+        observed_rng: Some(false),
+        unix_timestamp: Some(UnixTimestamp::from_millis(1_000).into()),
+        observed_time: Some(false),
+        log_lines: vec![],
+        audit_log_lines: vec![],
+        journal: Some(QueryJournal::new().into()),
+        result: Some(pb::common::FunctionResult {
+            result: Some(pb::common::function_result::Result::JsonPackedValue(
+                "\"ok\"".to_string(),
+            )),
+        }),
+        syscall_trace: Some(SyscallTrace::new().try_into().unwrap()),
+        observed_identity: Some(false),
+        memory_in_mb: 0,
+        user_execution_time: None,
+    };
+    let outcome = FunctionOutcome::from_proto(
+        pb::outcome::FunctionOutcome {
+            outcome: Some(pb::outcome::function_outcome::Outcome::Query(udf_outcome)),
+        },
+        Some(sample_path_and_args()),
+        None,
+        InertIdentity::System,
+    )
+    .unwrap();
+    (
+        sample_final_transaction(),
+        outcome,
+        FunctionUsageStats::default(),
+        sample_path_and_args(),
+        InertIdentity::System,
+    )
 }

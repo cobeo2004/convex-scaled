@@ -165,14 +165,8 @@ message TextQueryTermRead {
   common.FieldPath field_path = 1;
   oneof term {
     string exact = 2;
-    FuzzyTerm fuzzy = 3;
+    string prefix = 3;
   }
-}
-
-message FuzzyTerm {
-  string token = 1;
-  uint32 max_distance = 2;
-  bool prefix = 3;
 }
 
 message FilterConditionRead {
