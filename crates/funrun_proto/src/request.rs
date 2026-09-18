@@ -76,6 +76,7 @@ pub struct RunRequestParts {
     pub deployment: DeploymentMetadata,
     pub convex_origin: ConvexOrigin,
     pub subfunctions_in_same_isolate: bool,
+    pub s3_prefix: String,
 }
 
 fn udf_type_to_proto(udf_type: UdfType) -> i32 {
@@ -210,6 +211,7 @@ pub fn run_request_to_proto(
         deployment: Some(deployment_metadata_to_proto(parts.deployment.clone())),
         convex_origin: parts.convex_origin.to_string(),
         subfunctions_in_same_isolate: parts.subfunctions_in_same_isolate,
+        s3_prefix: parts.s3_prefix.clone(),
     })
 }
 
@@ -281,6 +283,7 @@ pub fn run_request_from_proto(
             anyhow::ensure!(http.is_some(), "HttpAction requires http metadata");
         },
     }
+    anyhow::ensure!(!proto.s3_prefix.is_empty(), "missing s3_prefix");
     Ok(RunRequestParts {
         instance_name: proto.instance_name,
         udf_type,
@@ -305,6 +308,7 @@ pub fn run_request_from_proto(
         )?,
         convex_origin: ConvexOrigin::from(proto.convex_origin),
         subfunctions_in_same_isolate: proto.subfunctions_in_same_isolate,
+        s3_prefix: proto.s3_prefix,
     })
 }
 
@@ -364,5 +368,13 @@ mod tests {
         let mut proto = run_request_to_proto(&sample()).unwrap();
         proto.bootstrap_metadata = None;
         assert!(run_request_from_proto(proto).is_err());
+    }
+
+    #[test]
+    fn empty_s3_prefix_is_an_error() {
+        let mut proto = run_request_to_proto(&sample()).unwrap();
+        proto.s3_prefix = String::new();
+        let err = run_request_from_proto(proto).err().unwrap();
+        assert!(format!("{err:#}").contains("missing s3_prefix"));
     }
 }

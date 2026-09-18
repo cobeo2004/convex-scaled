@@ -11,10 +11,12 @@ use funrun_proto::auth::{
     funrun_token,
     BearerInterceptor,
 };
-use funrun_worker::execute::FunrunService;
+use funrun_worker::{
+    execute::FunrunService,
+    host_client::connect_host,
+};
 use pb_funrun::funrun::{
     execute_up,
-    function_host_client::FunctionHostClient,
     funrun_client::FunrunClient,
     BodyChunk,
     ExecuteUp,
@@ -41,12 +43,7 @@ where
     let tokio = ProdRuntime::init_tokio().unwrap();
     let rt = ProdRuntime::new(&tokio);
     rt.clone().block_on("test", async move {
-        let host = FunctionHostClient::with_interceptor(
-            Channel::from_static("http://127.0.0.1:9").connect_lazy(),
-            BearerInterceptor {
-                token: funrun_token(SECRET),
-            },
-        );
+        let host = connect_host("http://127.0.0.1:9", funrun_token(SECRET)).unwrap();
         let service = FunrunService::new(rt, host, "carnitas", SECRET, None).unwrap();
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();

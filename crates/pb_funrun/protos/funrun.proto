@@ -65,6 +65,9 @@ message RunRequest {
   DeploymentMetadata deployment = 14;
   string convex_origin = 15;
   bool subfunctions_in_same_isolate = 16;
+  // StorageType::S3 prefix of the deployment; workers read modules and files
+  // under it.
+  string s3_prefix = 17;
 }
 
 message HttpActionMetadata {

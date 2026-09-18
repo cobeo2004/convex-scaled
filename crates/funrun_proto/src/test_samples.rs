@@ -164,6 +164,7 @@ pub fn sample_run_request_parts() -> RunRequestParts {
         },
         convex_origin: ConvexOrigin::from("http://127.0.0.1:3210"),
         subfunctions_in_same_isolate: true,
+        s3_prefix: "carnitas-instance-1234/".to_string(),
     }
 }
 

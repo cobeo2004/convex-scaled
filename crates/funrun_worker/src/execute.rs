@@ -112,7 +112,9 @@ type DownSender = mpsc::Sender<Result<ExecuteDown, Status>>;
 
 #[derive(Clone)]
 pub struct FunrunService {
+    rt: ProdRuntime,
     core: FunctionRunnerCore<ProdRuntime, WorkerStorage>,
+    storage: WorkerStorage,
     host: HostChannel,
     key_broker: FunctionRunnerKeyBroker,
     fetch_client: Arc<dyn FetchClient>,
@@ -144,14 +146,17 @@ impl FunrunService {
         };
         let isolate_worker =
             FunctionRunnerIsolateWorker::new(rt.clone(), IsolateConfig::new("funrun", limiter));
+        let storage = WorkerStorage::default();
         let core = FunctionRunnerCore::new(
-            rt,
-            WorkerStorage::default(),
+            rt.clone(),
+            storage.clone(),
             *FUNRUN_SCHEDULER_MAX_PERCENT_PER_CLIENT,
             isolate_worker,
         )?;
         Ok(Self {
+            rt,
             core,
+            storage,
             host,
             key_broker,
             fetch_client,
@@ -203,6 +208,10 @@ impl FunrunService {
         };
         let parts = run_request_from_proto(request)
             .map_err(|e| Status::invalid_argument(format!("invalid RunRequest: {e:#}")))?;
+        self.storage
+            .init(self.rt.clone(), &parts.s3_prefix)
+            .await
+            .map_err(|e| Status::failed_precondition(format!("{e:#}")))?;
 
         let (log_tx, mut log_rx) = mpsc::unbounded_channel();
         let (started_tx, mut started_rx) = oneshot::channel();

@@ -22,9 +22,7 @@ use udf::ActionCallbacks;
 #[tokio::test]
 async fn remote_index_reader_reads_through_host() {
     let host = start_host_with_fakes().await;
-    let client = connect_host(&format!("http://{}", host.addr), host.token.clone())
-        .await
-        .unwrap();
+    let client = connect_host(&format!("http://{}", host.addr), host.token.clone()).unwrap();
     let reader = RemoteIndexReader::new(client, sample_ts());
     let page = reader
         .index_page(
@@ -43,9 +41,7 @@ async fn remote_index_reader_reads_through_host() {
 #[tokio::test]
 async fn remote_callbacks_execute_mutation() {
     let host = start_host_with_fakes().await;
-    let client = connect_host(&format!("http://{}", host.addr), host.token.clone())
-        .await
-        .unwrap();
+    let client = connect_host(&format!("http://{}", host.addr), host.token.clone()).unwrap();
     let cb = RemoteActionCallbacks::new(client);
     let res = cb
         .execute_mutation(
@@ -62,9 +58,7 @@ async fn remote_callbacks_execute_mutation() {
 #[tokio::test]
 async fn remote_callback_error_metadata_survives() {
     let host = start_host_with_fakes().await;
-    let client = connect_host(&format!("http://{}", host.addr), host.token.clone())
-        .await
-        .unwrap();
+    let client = connect_host(&format!("http://{}", host.addr), host.token.clone()).unwrap();
     let cb = RemoteActionCallbacks::new(client);
     let err = cb
         .execute_query(

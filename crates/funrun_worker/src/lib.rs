@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use async_trait::async_trait;
 use aws_s3::storage::S3Storage;
 use common::{
@@ -21,10 +22,6 @@ use function_runner::server::{
     StorageForDeployment,
 };
 use funrun_proto::auth::funrun_token;
-use model::database_globals::{
-    types::StorageType,
-    DatabaseGlobalsModel,
-};
 use runtime::prod::ProdRuntime;
 use storage::{
     Storage,
@@ -55,12 +52,49 @@ mod metrics;
 
 /// Files and modules storage for the one deployment this worker serves, in
 /// the same S3 buckets as the conductor (`S3_STORAGE_{FILES,MODULES}_BUCKET`).
-/// The key prefix is a per-deployment secret that lives only in the
-/// conductor's `_db` globals, so the first run reads it through its own
-/// (host-backed) transaction, which is what `StorageForDeployment` takes the
-/// transaction for.
+/// `FunctionRunnerCore` takes its storage at construction, but the S3 prefix
+/// only arrives with the first request, so this fills in on first use and
+/// then hands out upstream `DeploymentStorage`.
 #[derive(Clone, Debug, Default)]
-pub struct WorkerStorage(Arc<OnceCell<DeploymentStorage>>);
+pub struct WorkerStorage(Arc<OnceCell<(String, DeploymentStorage)>>);
+
+impl WorkerStorage {
+    /// Builds the storage from the first request's prefix. Later requests
+    /// must carry the same prefix: one worker serves one deployment.
+    pub async fn init(&self, rt: ProdRuntime, s3_prefix: &str) -> anyhow::Result<()> {
+        let (serving, _) = self
+            .0
+            .get_or_try_init(|| async {
+                let storage = DeploymentStorage {
+                    files_storage: Arc::new(
+                        S3Storage::for_use_case(
+                            StorageUseCase::Files,
+                            s3_prefix.to_string(),
+                            rt.clone(),
+                        )
+                        .await?,
+                    ),
+                    modules_storage: Arc::new(
+                        S3Storage::for_use_case(StorageUseCase::Modules, s3_prefix.to_string(), rt)
+                            .await?,
+                    ),
+                };
+                anyhow::Ok((s3_prefix.to_string(), storage))
+            })
+            .await?;
+        ensure_same_deployment(serving, s3_prefix)
+    }
+}
+
+// The prefix embeds a per-deployment secret, so the error doesn't print it.
+fn ensure_same_deployment(serving: &str, requested: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        serving == requested,
+        "request's s3_prefix is not the deployment this worker serves (one worker serves one \
+         deployment)"
+    );
+    Ok(())
+}
 
 #[async_trait]
 impl<RT: Runtime> StorageForDeployment<RT> for WorkerStorage {
@@ -69,34 +103,10 @@ impl<RT: Runtime> StorageForDeployment<RT> for WorkerStorage {
         transaction: &mut Transaction<RT>,
         use_case: StorageUseCase,
     ) -> anyhow::Result<Arc<dyn Storage>> {
-        let storage = self
+        let (_, storage) = self
             .0
-            .get_or_try_init(|| async {
-                let rt = transaction.runtime().clone();
-                let globals = DatabaseGlobalsModel::new(transaction)
-                    .database_globals()
-                    .await?;
-                let s3_prefix = match globals.storage_type.clone() {
-                    Some(StorageType::S3 { s3_prefix }) => s3_prefix,
-                    Some(StorageType::Local { .. }) | None => anyhow::bail!(
-                        "remote function runner workers need the conductor on S3 storage"
-                    ),
-                };
-                anyhow::Ok(DeploymentStorage {
-                    files_storage: Arc::new(
-                        S3Storage::for_use_case(
-                            StorageUseCase::Files,
-                            s3_prefix.clone(),
-                            rt.clone(),
-                        )
-                        .await?,
-                    ),
-                    modules_storage: Arc::new(
-                        S3Storage::for_use_case(StorageUseCase::Modules, s3_prefix, rt).await?,
-                    ),
-                })
-            })
-            .await?;
+            .get()
+            .context("WorkerStorage used before a request set its s3_prefix")?;
         StorageForDeployment::<RT>::storage_for_deployment(storage, transaction, use_case).await
     }
 }
@@ -107,8 +117,7 @@ pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result
     let host = connect_host(
         &config.function_host_url,
         funrun_token(&config.instance_secret),
-    )
-    .await?;
+    )?;
     let service = FunrunService::new(
         rt,
         host,
@@ -152,4 +161,22 @@ pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result
         );
     }
     service.shutdown().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_same_deployment;
+
+    #[test]
+    fn same_prefix_is_accepted() {
+        assert!(ensure_same_deployment("dep-1/", "dep-1/").is_ok());
+    }
+
+    #[test]
+    fn different_prefix_is_rejected_without_leaking_it() {
+        let err = ensure_same_deployment("dep-1/", "dep-2/").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("one worker serves one deployment"));
+        assert!(!msg.contains("dep-"));
+    }
 }

@@ -308,7 +308,8 @@ pub async fn start_host_with_fakes() -> TestHost {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = socket.local_addr().unwrap();
     tokio::spawn(host.serve(socket, std::future::pending()));
-    // `connect_host` connects eagerly, so wait until the server listens.
+    // The host channel is lazy and does not retry a refused first dial, so
+    // wait until the server listens.
     tokio::time::timeout(Duration::from_secs(5), async {
         while TcpStream::connect(addr).await.is_err() {
             tokio::time::sleep(Duration::from_millis(10)).await;

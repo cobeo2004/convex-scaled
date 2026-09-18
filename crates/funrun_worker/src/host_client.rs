@@ -92,13 +92,14 @@ use crate::metrics::log_index_page_rpc;
 
 pub type HostChannel = FunctionHostClient<InterceptedService<Channel, BearerInterceptor>>;
 
-pub async fn connect_host(url: &str, token: String) -> anyhow::Result<HostChannel> {
+/// Lazy, so the worker can start before the conductor's `function_host`
+/// listens; the first RPC dials it.
+pub fn connect_host(url: &str, token: String) -> anyhow::Result<HostChannel> {
     let channel = Channel::from_shared(url.to_string())?
         .connect_timeout(Duration::from_secs(5))
         .http2_keep_alive_interval(Duration::from_secs(30))
         .keep_alive_timeout(Duration::from_secs(20))
-        .connect()
-        .await?;
+        .connect_lazy();
     Ok(
         FunctionHostClient::with_interceptor(channel, BearerInterceptor { token })
             .max_encoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE)
