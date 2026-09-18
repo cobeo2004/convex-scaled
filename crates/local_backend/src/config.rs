@@ -20,6 +20,7 @@ use keybroker::{
 };
 use metrics::SERVER_VERSION_STR;
 use model::database_globals::types::StorageTagInitializer;
+use remote_function_runner::pool::RoutingMode;
 use serde_json::Value as JsonValue;
 use url::Url;
 
@@ -145,8 +146,37 @@ pub struct LocalConfig {
     #[clap(long)]
     pub local_log_sink: Option<String>,
 
+    /// Where UDFs run: in this process, or on remote `funrun_worker`s.
+    #[clap(long, env = "FUNCTION_RUNNER", value_enum, default_value_t = FunctionRunnerMode::Local)]
+    pub function_runner: FunctionRunnerMode,
+
+    /// Worker target (`host:port`) for `--function-runner remote`.
+    #[clap(
+        long,
+        env = "FUNRUN_WORKERS",
+        required_if_eq("function_runner", "remote")
+    )]
+    pub funrun_workers: Option<String>,
+
+    /// How `--funrun-workers` is interpreted: a DNS name resolving to every
+    /// worker (`direct`) or a single load-balanced address (`proxy`).
+    #[clap(long, env = "FUNRUN_ROUTING", value_enum, default_value_t = RoutingMode::Direct)]
+    pub funrun_routing: RoutingMode,
+
+    /// Address the worker-facing FunctionHost gRPC service listens on
+    /// (remote mode only).
+    #[clap(long, env = "FUNCTION_HOST_LISTEN", default_value = "0.0.0.0:7401")]
+    pub function_host_listen: SocketAddr,
+
     #[clap(subcommand)]
     pub subcommand: Option<Subcommand>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FunctionRunnerMode {
+    #[default]
+    Local,
+    Remote,
 }
 
 #[derive(ClapSubcommand, Clone)]
@@ -259,5 +289,4 @@ impl LocalConfig {
             }
         }
     }
-
 }

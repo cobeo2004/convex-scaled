@@ -15,6 +15,7 @@ use ::authentication::{
     application_auth::ApplicationAuth,
 };
 use ::usage_limits::NoopUsageLimitNotifier;
+use anyhow::Context;
 use application::{
     self,
     api::ApplicationApi,
@@ -35,7 +36,10 @@ use common::{
         NODE_ACTION_USER_TIMEOUT,
         UDF_CACHE_MAX_SIZE,
     },
-    persistence::Persistence,
+    persistence::{
+        Persistence,
+        RepeatablePersistence,
+    },
     runtime::{
         new_rate_limiter,
         Runtime,
@@ -46,32 +50,53 @@ use common::{
         ConvexSite,
         DeploymentClass,
         DeploymentMetadata,
+        RepeatableTimestamp,
         TEST_REGION_NAME,
     },
 };
-use config::LocalConfig;
-use database::Database;
+use config::{
+    FunctionRunnerMode,
+    LocalConfig,
+};
+use database::{
+    Database,
+    TextIndexManagerSnapshot,
+    TransactionTextSnapshot,
+};
 use events::usage::NoOpUsageEventLogger;
 use exports::interface::InProcessExportProvider;
 use file_storage::{
     FileStorage,
     TransactionalFileStorage,
 };
+use function_host::FunctionHost;
 use function_runner::{
     in_process_function_runner::InProcessFunctionRunner,
     server::DeploymentStorage,
     FunctionRunner,
 };
+use funrun_proto::auth::funrun_token;
 use governor::Quota;
 use http_client::CachedHttpClient;
-use indexing::index_cache::IndexCache;
+use indexing::{
+    index_cache::IndexCache,
+    index_reader::IndexReader,
+};
 use model::{
+    database_globals::{
+        types::StorageType,
+        DatabaseGlobalsModel,
+    },
     initialize_application_system_tables,
     virtual_system_mapping,
 };
 use node_executor::{
     local::LocalNodeExecutor,
     NodeActions,
+};
+use remote_function_runner::{
+    pool::WorkerPool,
+    RemoteFunctionRunner,
 };
 use runtime::prod::ProdRuntime;
 use search::{
@@ -158,6 +183,12 @@ pub async fn make_app(
     zombify_rx: async_broadcast::Receiver<()>,
     preempt_tx: ShutdownSignal,
 ) -> anyhow::Result<LocalAppState> {
+    // Fail before touching the database: workers load modules from shared
+    // storage, so remote mode needs S3.
+    anyhow::ensure!(
+        config.function_runner == FunctionRunnerMode::Local || config.s3_storage,
+        "FUNCTION_RUNNER=remote requires --s3-storage: workers load modules from shared storage"
+    );
     let key_broker = config.key_broker()?;
     let in_process_searcher = Arc::new(InProcessSearcher::new(runtime.clone())?);
     let searcher: Arc<dyn Searcher> = in_process_searcher.clone();
@@ -229,21 +260,50 @@ pub async fn make_app(
         config.name(),
         reqwest::redirect::Policy::default(),
     );
-    let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
-        Arc::new(InProcessFunctionRunner::new(
-            deployment,
-            key_broker.function_runner_keybroker(),
-            config.convex_origin_url()?,
-            runtime.clone(),
-            persistence.reader(),
-            DeploymentStorage {
-                files_storage: application_storage.files_storage.clone(),
-                modules_storage: application_storage.modules_storage.clone(),
-            },
-            database.clone(),
-            fetch_client.clone(),
-        )?);
+    let local_runner = InProcessFunctionRunner::new(
+        deployment.clone(),
+        key_broker.function_runner_keybroker(),
+        config.convex_origin_url()?,
+        runtime.clone(),
+        persistence.reader(),
+        DeploymentStorage {
+            files_storage: application_storage.files_storage.clone(),
+            modules_storage: application_storage.modules_storage.clone(),
+        },
+        database.clone(),
+        fetch_client.clone(),
+    )?;
+    // `key_broker()` above already required the secret.
+    let funrun_token = funrun_token(
+        config
+            .instance_secret
+            .as_deref()
+            .context("--instance-secret is required")?,
+    );
+    let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> = match config.function_runner {
+        FunctionRunnerMode::Local => Arc::new(local_runner),
+        FunctionRunnerMode::Remote => {
+            let pool = WorkerPool::start(
+                runtime.clone(),
+                config
+                    .funrun_workers
+                    .clone()
+                    .context("FUNRUN_WORKERS is required")?,
+                config.funrun_routing,
+                funrun_token.clone(),
+            )?;
+            Arc::new(RemoteFunctionRunner::new(
+                pool,
+                local_runner,
+                database.clone(),
+                deployment,
+                config.convex_origin_url()?,
+                s3_prefix(&database).await?,
+            ))
+        },
+    };
 
+    let persistence_reader = persistence.reader();
     let application = Application::new(
         runtime.clone(),
         database.clone(),
@@ -285,6 +345,17 @@ pub async fn make_app(
     )
     .await?;
 
+    if config.function_runner == FunctionRunnerMode::Remote {
+        start_function_host(
+            &runtime,
+            &database,
+            persistence_reader,
+            &application,
+            config.function_host_listen,
+            funrun_token,
+        )?;
+    }
+
     let origin = config.convex_origin_url()?;
     let instance_name = config.name();
 
@@ -309,6 +380,84 @@ pub async fn make_app(
     Ok(app_state)
 }
 
+/// The `StorageType::S3` prefix `Application::initialize_storage` persisted in
+/// the database globals.
+async fn s3_prefix(database: &Database<ProdRuntime>) -> anyhow::Result<String> {
+    let mut tx = database.begin_system().await?;
+    let globals = DatabaseGlobalsModel::new(&mut tx)
+        .database_globals()
+        .await?;
+    match globals.into_value().storage_type {
+        Some(StorageType::S3 { s3_prefix }) => Ok(s3_prefix),
+        other @ (Some(StorageType::Local { .. }) | None) => {
+            anyhow::bail!("FUNCTION_RUNNER=remote requires S3 storage, found {other:?}")
+        },
+    }
+}
+
+/// `ts` comes from a worker; only read at timestamps the database already
+/// made repeatable.
+fn worker_ts(
+    latest: RepeatableTimestamp,
+    ts: RepeatableTimestamp,
+) -> anyhow::Result<RepeatableTimestamp> {
+    latest
+        .prior_ts(*ts)
+        .with_context(|| format!("worker timestamp {ts} is past the repeatable timestamp {latest}"))
+}
+
+/// Serves the worker-facing FunctionHost gRPC service in the background.
+fn start_function_host(
+    runtime: &ProdRuntime,
+    database: &Database<ProdRuntime>,
+    reader: Arc<dyn common::persistence::PersistenceReader>,
+    application: &Application<ProdRuntime>,
+    listen: std::net::SocketAddr,
+    token: String,
+) -> anyhow::Result<()> {
+    let db_reader = database.clone();
+    let db_text = database.clone();
+    let db_index = database.clone();
+    let host = Arc::new(FunctionHost::new(
+        Arc::new(move |ts| {
+            let ts = worker_ts(db_reader.now_ts_for_reads(), ts)?;
+            let rp =
+                RepeatablePersistence::new(reader.clone(), ts, db_reader.retention_validator());
+            Ok(Arc::new(rp.read_snapshot(ts)?) as Arc<dyn IndexReader>)
+        }),
+        Arc::new(move |ts| {
+            let snapshot = db_text.snapshot(worker_ts(db_text.now_ts_for_reads(), ts)?)?;
+            Ok(Arc::new(TextIndexManagerSnapshot::new(
+                snapshot.index_registry,
+                snapshot.text_indexes,
+                db_text.searcher.clone(),
+                db_text.search_storage.clone(),
+            )) as Arc<dyn TransactionTextSnapshot>)
+        }),
+        Arc::new(move |ts, index_id| {
+            let snapshot = db_index.snapshot(worker_ts(db_index.now_ts_for_reads(), ts)?)?;
+            snapshot
+                .index_registry
+                .enabled_index_by_index_id(&index_id)
+                .cloned()
+                .context("index not found")
+        }),
+        token,
+    ));
+    // The host holds a Weak; `Application` owns this runner for the process
+    // lifetime.
+    host.set_action_callbacks(application.runner());
+    // Bind now so a taken port fails startup instead of a background task.
+    let socket = common::http::server_socket(listen)?;
+    tracing::info!("function_host listening on {listen}");
+    runtime.spawn_background("function_host", async move {
+        if let Err(e) = host.serve(socket, std::future::pending()).await {
+            tracing::error!("function_host exited: {e:#}");
+        }
+    });
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct HttpActionRouteMapper;
 
@@ -321,5 +470,35 @@ impl RouteMapper for HttpActionRouteMapper {
         } else {
             route
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common::types::{
+        RepeatableReason,
+        RepeatableTimestamp,
+        Timestamp,
+    };
+
+    use super::worker_ts;
+
+    fn repeatable(ts: u64) -> RepeatableTimestamp {
+        RepeatableTimestamp::new_validated(
+            Timestamp::try_from(ts).unwrap(),
+            RepeatableReason::SnapshotManagerLatest,
+        )
+    }
+
+    #[test]
+    fn worker_ts_accepts_timestamps_up_to_the_repeatable_ts() -> anyhow::Result<()> {
+        assert_eq!(worker_ts(repeatable(10), repeatable(10))?, repeatable(10));
+        assert_eq!(worker_ts(repeatable(10), repeatable(3))?, repeatable(3));
+        Ok(())
+    }
+
+    #[test]
+    fn worker_ts_rejects_timestamps_past_the_repeatable_ts() {
+        assert!(worker_ts(repeatable(10), repeatable(11)).is_err());
     }
 }
