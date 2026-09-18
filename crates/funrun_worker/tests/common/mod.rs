@@ -309,9 +309,13 @@ pub async fn start_host_with_fakes() -> TestHost {
     let addr = socket.local_addr().unwrap();
     tokio::spawn(host.serve(socket, std::future::pending()));
     // `connect_host` connects eagerly, so wait until the server listens.
-    while TcpStream::connect(addr).await.is_err() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while TcpStream::connect(addr).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     TestHost {
         addr,
         token,

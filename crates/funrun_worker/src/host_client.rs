@@ -2,7 +2,10 @@
 //! The worker has no database: every read and callback is a `FunctionHost`
 //! RPC to the conductor.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use common::{
@@ -90,7 +93,12 @@ use crate::metrics::log_index_page_rpc;
 pub type HostChannel = FunctionHostClient<InterceptedService<Channel, BearerInterceptor>>;
 
 pub async fn connect_host(url: &str, token: String) -> anyhow::Result<HostChannel> {
-    let channel = Channel::from_shared(url.to_string())?.connect().await?;
+    let channel = Channel::from_shared(url.to_string())?
+        .connect_timeout(Duration::from_secs(5))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(20))
+        .connect()
+        .await?;
     Ok(
         FunctionHostClient::with_interceptor(channel, BearerInterceptor { token })
             .max_encoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE)

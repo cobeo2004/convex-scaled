@@ -48,7 +48,16 @@ pub fn parse_psi_avg10(line: &str) -> Option<f64> {
 
 // ponytail: Linux /proc only (workers run in Linux containers). Elsewhere
 // cpu_util reads 0.0 and PSI None, so load falls back to the in-flight signal.
+// /proc/stat and /proc/pressure/cpu are host-wide, not per cgroup; read
+// /sys/fs/cgroup/cpu.stat and cpu.pressure instead if workers get CPU quotas.
 // The reads are tiny blocking fs calls, done once per report interval.
+pub struct CpuSample {
+    /// CPU utilisation since the previous sample, in [0, 1].
+    pub util: f64,
+    /// PSI "some" avg10 as a fraction, when the kernel exposes it.
+    pub psi: Option<f64>,
+}
+
 #[derive(Default)]
 pub struct CpuSampler {
     prev: Option<(u64, u64)>, // (idle, total) jiffies
@@ -59,13 +68,12 @@ impl CpuSampler {
         Self::default()
     }
 
-    /// Returns (cpu utilisation since the previous sample, PSI avg10).
-    pub fn sample(&mut self) -> (f64, Option<f64>) {
+    pub fn sample(&mut self) -> CpuSample {
         let psi = std::fs::read_to_string("/proc/pressure/cpu")
             .ok()
             .and_then(|s| s.lines().next().and_then(parse_psi_avg10));
         let Some((idle, total)) = read_proc_stat() else {
-            return (0.0, psi);
+            return CpuSample { util: 0.0, psi };
         };
         let util = match self.prev.replace((idle, total)) {
             Some((pi, pt)) if total > pt => {
@@ -73,7 +81,7 @@ impl CpuSampler {
             },
             _ => 0.0,
         };
-        (util, psi)
+        CpuSample { util, psi }
     }
 }
 
@@ -84,6 +92,8 @@ fn read_proc_stat() -> Option<(u64, u64)> {
         .next()?
         .split_whitespace()
         .skip(1)
+        // guest and guest_nice (fields 9-10) are already counted in user/nice.
+        .take(8)
         .filter_map(|v| v.parse().ok())
         .collect();
     let idle = cpu.get(3)? + cpu.get(4).copied().unwrap_or(0); // idle + iowait
