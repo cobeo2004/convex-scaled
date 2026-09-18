@@ -60,3 +60,10 @@ and are overridable env vars; **defaults are for local development only.**
   supplying its own `command:`.
 - `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart
   uploads without a KMS/SSE-S3 key configured.
+
+## E2E equivalence suite
+
+`e2e/run.sh [local|direct|proxy ...]` brings the stack up once per config
+(default: all three), deploys `e2e/convex/`, runs `e2e/tests/` with vitest,
+checks that remote configs created isolates only on workers, and tears the
+stack down (`-v`). Uses the existing images; `BUILD=1` rebuilds first.
