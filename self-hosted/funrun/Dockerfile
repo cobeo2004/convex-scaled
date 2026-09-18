@@ -4,6 +4,12 @@
 # Copied from ../docker-build/Dockerfile.backend, extended to also build
 # `funrun_worker` and to drop the ENTRYPOINT so each compose service picks
 # its own binary/wrapper via `command:`.
+#
+# ponytail: this is a near-copy, not a shared base -- Dockerfile.backend
+# changes must be re-synced here by hand. Upgrade path: give
+# Dockerfile.backend's build stage an `extra-binaries` ARG (space-separated
+# `-p <crate> --bin <bin>` pairs) upstream so this file can `FROM` it, or copy
+# its runtime stage, instead of duplicating the whole build.
 
 ARG VERGEN_GIT_SHA
 ARG VERGEN_GIT_COMMIT_TIMESTAMP

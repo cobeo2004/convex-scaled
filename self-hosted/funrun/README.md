@@ -43,38 +43,20 @@ If a deploy's `ctx.storage.store`/`ctx.storage.get` action fails against
 RustFS, try disabling S3 features one at a time in `x-common-env`:
 `AWS_S3_DISABLE_SSE=true`, then `AWS_S3_DISABLE_CHECKSUMS=true`.
 
-## Deviations from the brief
+## Credentials
 
-- **conductor `command`**: the brief's literal
-  `["convex-local-backend", "--s3-storage", "--instance-name", "convex-self-hosted"]`
-  can't actually authenticate or reach Postgres: `crates/local_backend/src/config.rs`'s
-  `LocalConfig` only has `env = "..."` on the four new remote-runner flags
-  (`FUNCTION_RUNNER`, `FUNRUN_WORKERS`, `FUNRUN_ROUTING`, `FUNCTION_HOST_LISTEN`);
-  `instance_name`/`instance_secret`/`db`/`db_spec`/`s3_storage` are CLI-only, so
-  the given command would run without `--instance-secret` (clap requires it once
-  `--instance-name` is passed) and would default to SQLite (no `POSTGRES_URL`
-  reader on the Rust side). `self-hosted/docker-build/run_backend.sh` is exactly
-  the existing env->flag translator for those fields (it already reads
-  `INSTANCE_NAME`, `INSTANCE_SECRET`, `POSTGRES_URL`, `DO_NOT_REQUIRE_SSL`, the
-  `S3_*` vars) and is already copied into the image by the reused Dockerfile
-  stages, so `conductor.command` is `["./run_backend.sh"]` instead. The new
-  remote-runner flags are still read straight from the environment by clap
-  (they have `env = "..."` attrs), so no change to `run_backend.sh` was needed.
-- **Dockerfile has no `ENTRYPOINT`** (`Dockerfile.backend` sets
-  `ENTRYPOINT ["./run_backend.sh"]`): this image is shared by both the
-  conductor and worker services, and the worker must exec `./funrun_worker`
-  directly (its `WorkerConfig` *is* fully env-wired). Each service supplies
-  its own full command instead.
-- **`cargo chef prepare` has no `--bin` filter** (brief said
-  `--bin convex-local-backend`, add `-p funrun_worker --bin funrun_worker` to
-  the build): `cargo-chef prepare --bin` can only be passed once (confirmed via
-  `cargo chef prepare --help`), so scoping to one binary isn't possible when
-  building two. The recipe now covers the whole workspace instead; `cargo chef
-  cook`/`cargo build` are unaffected (they already build everything needed for
-  both binaries).
-- **`V8_ACTION_USER_TIMEOUT_SECS` in `knobs.env` is `1800`**, not the brief's
-  placeholder `600` — `crates/common/src/knobs.rs` defines the upstream
-  default as `1800` (`NODE_ACTION_USER_TIMEOUT_SECS` is the one defaulting to
-  `600`). The brief said to replace every placeholder with the real upstream
-  default, so `1800` is used. Envoy's `timeout: 2100s` (35 min) is kept as
-  specified — a buffer above the 30-minute V8 action timeout.
+`RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY` default to `rustfsadmin`/`rustfsadmin`
+and are overridable env vars; **defaults are for local development only.**
+
+## Operational notes
+
+- `conductor.command` is `["./run_backend.sh"]` (not a direct
+  `convex-local-backend` invocation) because `run_backend.sh` is the existing
+  env->CLI-flag translator for `--instance-name`/`--instance-secret`/
+  `--s3-storage`/Postgres, which `LocalConfig`'s clap doesn't read from the
+  environment directly.
+- The Dockerfile has no `ENTRYPOINT` because the same image serves both the
+  conductor (`./run_backend.sh`) and worker (`./funrun_worker`) services, each
+  supplying its own `command:`.
+- `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart
+  uploads without a KMS/SSE-S3 key configured.

@@ -11,6 +11,13 @@ static_resources:
                 stat_prefix: funrun
                 codec_type: HTTP2
                 http2_protocol_options: {}
+                # ponytail: Envoy's HCM stream_idle_timeout defaults to 300s and
+                # would reset a quiet-but-alive action/UDF stream well inside the
+                # conductor's own run timeout (up to 1800s); R13 never retries a
+                # proxy-mode call, so that reset would be a silent failure.
+                # Disable it and rely on the route timeout/idle_timeout below
+                # (2100s, > 1800s) as the real bound.
+                stream_idle_timeout: 0s
                 route_config:
                   name: funrun_route
                   virtual_hosts:
@@ -21,6 +28,7 @@ static_resources:
                           route:
                             cluster: workers
                             timeout: 2100s
+                            idle_timeout: 2100s
                             hash_policy:
                               - header:
                                   header_name: x-convex-module
@@ -48,4 +56,4 @@ static_resources:
 
 admin:
   address:
-    socket_address: { address: 0.0.0.0, port_value: 9901 }
+    socket_address: { address: 127.0.0.1, port_value: 9901 }

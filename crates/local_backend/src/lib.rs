@@ -283,6 +283,9 @@ pub async fn make_app(
     let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> = match config.function_runner {
         FunctionRunnerMode::Local => Arc::new(local_runner),
         FunctionRunnerMode::Remote => {
+            // Fail fast on a missing/non-S3 storage config before starting the
+            // worker pool (which opens network connections).
+            let s3_prefix = s3_prefix(&database).await?;
             let pool = WorkerPool::start(
                 runtime.clone(),
                 config
@@ -298,7 +301,7 @@ pub async fn make_app(
                 database.clone(),
                 deployment,
                 config.convex_origin_url()?,
-                s3_prefix(&database).await?,
+                s3_prefix,
             ))
         },
     };
@@ -448,9 +451,12 @@ fn start_function_host(
     // lifetime.
     host.set_action_callbacks(application.runner());
     // Bind now so a taken port fails startup instead of a background task.
+    // `host.serve` itself logs "gRPC services funrun.FunctionHost listening
+    // on ..." once bound, so no separate info log here.
     let socket = common::http::server_socket(listen)?;
-    tracing::info!("function_host listening on {listen}");
     runtime.spawn_background("function_host", async move {
+        // ponytail: host dies with the process; wire the shutdown/preempt
+        // signal if draining worker callbacks matters.
         if let Err(e) = host.serve(socket, std::future::pending()).await {
             tracing::error!("function_host exited: {e:#}");
         }
