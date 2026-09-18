@@ -107,6 +107,8 @@ use crate::{
 };
 
 const LOAD_REPORT_INTERVAL: Duration = Duration::from_millis(500);
+/// The conductor sends the RunRequest right after the response headers.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 type DownSender = mpsc::Sender<Result<ExecuteDown, Status>>;
 
@@ -193,9 +195,14 @@ impl FunrunService {
     /// was sent, or as soon as the client goes away, which drops (cancels)
     /// the run future and releases the in-flight slot.
     async fn run(&self, mut up: Streaming<ExecuteUp>, tx: &DownSender) -> Result<(), Status> {
+        let first = tokio::time::timeout(FIRST_FRAME_TIMEOUT, up.message())
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded("no RunRequest within the first-frame timeout")
+            })??;
         let Some(ExecuteUp {
             inner: Some(Up::Request(request)),
-        }) = up.message().await?
+        }) = first
         else {
             return Err(Status::invalid_argument(
                 "first Execute frame must be a RunRequest",
@@ -213,6 +220,9 @@ impl FunrunService {
             .await
             .map_err(|e| Status::failed_precondition(format!("{e:#}")))?;
 
+        // Unbounded because upstream's `log_line_sender` and
+        // `HttpActionResponseStreamer` take `UnboundedSender`s; the loop below
+        // drains both into the bounded down stream.
         let (log_tx, mut log_rx) = mpsc::unbounded_channel();
         let (started_tx, mut started_rx) = oneshot::channel();
         let (resp_tx, mut resp_rx) = mpsc::unbounded_channel();
@@ -260,6 +270,10 @@ impl FunrunService {
         loop {
             tokio::select! {
                 biased;
+                // ponytail: upstream does not stop an HttpAction isolate when
+                // its response closes (isolate_worker.rs:196-236); dropping
+                // `run` here frees the slot early, same as in process. Stop the
+                // isolate too if leaked work shows up in load.
                 _ = tx.closed() => return Err(Status::cancelled("Execute stream dropped")),
                 started = &mut started_rx, if started_pending => {
                     started_pending = false;
@@ -371,6 +385,8 @@ impl Funrun for FunrunService {
             let targets = LoadTargets::from_knobs();
             let mut sampler = CpuSampler::new();
             let mut interval = tokio::time::interval(LOAD_REPORT_INTERVAL);
+            // A slow client or sample must not cause a burst of catch-up reports.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
                 // The only place CpuSampler runs: its /proc reads block.

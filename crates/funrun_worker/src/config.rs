@@ -1,6 +1,7 @@
 use clap::Parser;
 
-#[derive(Parser, Debug, Clone)]
+// No `Debug`: it would print `instance_secret`.
+#[derive(Parser, Clone)]
 #[clap(name = "funrun_worker")]
 pub struct WorkerConfig {
     #[clap(long, env = "FUNRUN_LISTEN", default_value = "0.0.0.0:7400")]
