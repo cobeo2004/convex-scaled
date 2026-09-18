@@ -4079,6 +4079,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a597f730845c4bd1d4ef892ae898bbcf867375d72f43e50f285e07e59c4f589"
 
 [[package]]
+name = "function_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "common",
+ "convex_sync_types",
+ "database",
+ "errors",
+ "funrun_proto",
+ "indexing",
+ "keybroker",
+ "model",
+ "parking_lot",
+ "pb",
+ "pb_funrun",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "udf",
+ "usage_tracking",
+ "value",
+ "vector",
+]
+
+[[package]]
 name = "function_runner"
 version = "0.1.0"
 dependencies = [
