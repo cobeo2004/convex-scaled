@@ -125,6 +125,8 @@ use crate::{
         WorkerPool,
     },
     retry::{
+        failure_stage,
+        is_transport_failure,
         may_retry,
         FailureStage,
     },
@@ -352,15 +354,6 @@ struct AttemptFailure {
     error: anyhow::Error,
 }
 
-fn failure(started: bool, error: anyhow::Error) -> AttemptFailure {
-    let stage = if started {
-        FailureStage::AfterStart
-    } else {
-        FailureStage::BeforeStart
-    };
-    AttemptFailure { stage, error }
-}
-
 /// Runs `request` on a worker, retrying on other workers only when
 /// `may_retry` allows it.
 async fn execute_with_retries(
@@ -391,6 +384,7 @@ async fn execute_with_retries(
         let _in_flight = pool.begin(&addr);
         let failure = match execute_once(
             client,
+            udf_type,
             module_header.clone(),
             request.clone(),
             log_line_sender,
@@ -419,6 +413,7 @@ async fn execute_with_retries(
 /// the retry policy.
 async fn execute_once(
     mut client: FunrunChannel,
+    udf_type: UdfType,
     module: AsciiMetadataValue,
     request: RunRequest,
     log_line_sender: Option<&mpsc::UnboundedSender<LogLine>>,
@@ -439,13 +434,25 @@ async fn execute_once(
     req.set_timeout(*FUNRUN_RUN_FUNCTION_TIMEOUT);
     let mut down = match client.execute(req).await {
         Ok(response) => response.into_inner(),
-        Err(status) => return Ok(Err(failure(false, status.into_anyhow()))),
+        // The call failed before the worker took the RunRequest.
+        Err(status) if is_transport_failure(&status) => {
+            let stage = failure_stage(udf_type, false, false, false);
+            return Ok(Err(AttemptFailure {
+                stage,
+                error: status.into_anyhow(),
+            }));
+        },
+        Err(status) => return Err(status.into_anyhow()),
     };
     let client_gone = http_response.as_ref().map(|s| s.sender.clone());
     let mut pump: Option<BoxFuture<'static, ()>> = None;
-    // Flips only on the worker's `Started`: from then on actions may have
-    // had side effects.
+    // Flips only on the worker's `Started`. Actions count as started even
+    // before it (see `failure_stage`).
     let mut started = false;
+    let lost = |started: bool, error: anyhow::Error| AttemptFailure {
+        stage: failure_stage(udf_type, true, false, started),
+        error,
+    };
     loop {
         tokio::select! {
             biased;
@@ -455,10 +462,13 @@ async fn execute_once(
             },
             frame = down.message() => {
                 let inner = match frame {
-                    Err(status) => return Ok(Err(failure(started, status.into_anyhow()))),
+                    Err(status) if is_transport_failure(&status) => {
+                        return Ok(Err(lost(started, status.into_anyhow())));
+                    },
+                    Err(status) => return Err(status.into_anyhow()),
                     Ok(None) => {
                         let error = anyhow::anyhow!("funrun Execute stream ended without a result");
-                        return Ok(Err(failure(started, error)));
+                        return Ok(Err(lost(started, error)));
                     },
                     Ok(Some(ExecuteDown { inner })) => inner.context("empty ExecuteDown frame")?,
                 };
@@ -490,7 +500,10 @@ async fn execute_once(
                     },
                     Down::Overloaded(Overloaded { reason }) => {
                         let error = ErrorMetadata::overloaded("FunrunWorkerOverloaded", reason);
-                        return Ok(Err(failure(started, error.into())));
+                        return Ok(Err(AttemptFailure {
+                            stage: failure_stage(udf_type, true, true, started),
+                            error: error.into(),
+                        }));
                     },
                     Down::Result(result) => return Ok(Ok(result)),
                 }
@@ -580,12 +593,14 @@ mod tests {
         WorkerPool,
     };
 
-    /// Answers the n-th Execute call (from 0) with `script(n)`, then ends
-    /// the stream.
+    type Frame = Result<Down, Status>;
+
+    /// Reads the RunRequest, answers the n-th Execute call (from 0) with
+    /// `script(n)`, then ends the stream.
     #[derive(Clone)]
     struct FakeWorker {
         calls: Arc<AtomicUsize>,
-        script: fn(usize) -> Vec<Down>,
+        script: fn(usize) -> Vec<Frame>,
     }
 
     #[tonic::async_trait]
@@ -595,12 +610,13 @@ mod tests {
 
         async fn execute(
             &self,
-            _request: Request<Streaming<ExecuteUp>>,
+            request: Request<Streaming<ExecuteUp>>,
         ) -> Result<Response<Self::ExecuteStream>, Status> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            request.into_inner().message().await?;
             let frames = (self.script)(call)
                 .into_iter()
-                .map(|inner| Ok(ExecuteDown { inner: Some(inner) }));
+                .map(|frame| frame.map(|inner| ExecuteDown { inner: Some(inner) }));
             Ok(Response::new(Box::pin(futures::stream::iter(frames))))
         }
 
@@ -612,7 +628,7 @@ mod tests {
         }
     }
 
-    async fn start_fake(script: fn(usize) -> Vec<Down>) -> (String, Arc<AtomicUsize>) {
+    async fn start_fake(script: fn(usize) -> Vec<Frame>) -> (String, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let fake = FakeWorker {
             calls: calls.clone(),
@@ -662,24 +678,32 @@ mod tests {
         .await
     }
 
-    fn overloaded(_: usize) -> Vec<Down> {
-        vec![Down::Overloaded(Overloaded {
+    fn overloaded(_: usize) -> Vec<Frame> {
+        vec![Ok(Down::Overloaded(Overloaded {
             reason: "full".into(),
-        })]
+        }))]
     }
 
-    fn succeeds(_: usize) -> Vec<Down> {
+    fn succeeds(_: usize) -> Vec<Frame> {
         vec![
-            Down::Started(Started {}),
-            Down::Result(RunResult::default()),
+            Ok(Down::Started(Started {})),
+            Ok(Down::Result(RunResult::default())),
         ]
     }
 
-    fn drops_after_start(_: usize) -> Vec<Down> {
-        vec![Down::Started(Started {})]
+    fn drops_after_start(_: usize) -> Vec<Frame> {
+        vec![Ok(Down::Started(Started {}))]
     }
 
-    fn drops_after_start_then_succeeds(call: usize) -> Vec<Down> {
+    fn drops_before_start(_: usize) -> Vec<Frame> {
+        vec![]
+    }
+
+    fn fails_precondition(_: usize) -> Vec<Frame> {
+        vec![Err(Status::failed_precondition("wrong deployment"))]
+    }
+
+    fn drops_after_start_then_succeeds(call: usize) -> Vec<Frame> {
         if call == 0 {
             drops_after_start(call)
         } else {
@@ -716,6 +740,31 @@ mod tests {
             format!("{err:#}").contains("ended without a result"),
             "{err:#}"
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn action_is_not_retried_when_stream_drops_before_started() {
+        let (addr, calls) = start_fake(drops_before_start).await;
+        let pool = pool_of(&[&addr]);
+
+        let err = run(&pool, "m.js", UdfType::Action).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("ended without a result"),
+            "{err:#}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn deterministic_worker_error_is_not_retried() {
+        let (addr, calls) = start_fake(fails_precondition).await;
+        let pool = pool_of(&[&addr]);
+
+        let err = run(&pool, "m.js", UdfType::Query).await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("wrong deployment"), "{err:#}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
