@@ -90,6 +90,7 @@ flate2 = { version = "1.1", features = [ "zlib-rs" ] }
 flexbuffers = "25"
 fnv = "1.0.7"
 function_runner = { path = "crates/function_runner" }
+funrun_proto = { path = "crates/funrun_proto" }
 futures = "0.3"
 futures-async-stream = "0.2.11"
 futures-util = "0.3.30"

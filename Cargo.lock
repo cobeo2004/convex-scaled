@@ -4113,6 +4113,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "funrun_proto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.13.1",
+ "common",
+ "convex_sync_types",
+ "database",
+ "function_runner",
+ "indexing",
+ "keybroker",
+ "pb",
+ "pb_funrun",
+ "search",
+ "serde_json",
+ "tonic",
+ "udf",
+ "usage_tracking",
+ "value",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
