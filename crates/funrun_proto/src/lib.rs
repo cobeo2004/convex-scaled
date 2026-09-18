@@ -4,8 +4,12 @@ use std::{
 };
 
 pub mod auth;
+pub mod callbacks;
+pub mod http;
 pub mod ids;
+pub mod index_page;
 pub mod request;
+pub mod search;
 pub mod transaction;
 
 #[cfg(test)]

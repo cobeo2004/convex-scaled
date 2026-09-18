@@ -4120,16 +4120,22 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.13.1",
  "common",
+ "convex_sync_types",
  "database",
  "function_runner",
+ "http 1.5.0",
+ "indexing",
  "keybroker",
+ "model",
  "pb",
  "pb_funrun",
  "search",
+ "serde_json",
  "tonic",
  "udf",
  "usage_tracking",
  "value",
+ "vector",
 ]
 
 [[package]]

@@ -135,14 +135,14 @@ fn read_size_from_proto(p: pb_funrun::funrun::ReadSize) -> anyhow::Result<Transa
     })
 }
 
-fn index_name_to_proto(name: &TabletIndexName) -> pb_funrun::funrun::TabletIndexName {
+pub(crate) fn index_name_to_proto(name: &TabletIndexName) -> pb_funrun::funrun::TabletIndexName {
     pb_funrun::funrun::TabletIndexName {
         tablet_id: tablet_id_to_bytes(*name.table()),
         descriptor: name.descriptor().to_string(),
     }
 }
 
-fn index_name_from_proto(
+pub(crate) fn index_name_from_proto(
     p: Option<pb_funrun::funrun::TabletIndexName>,
 ) -> anyhow::Result<TabletIndexName> {
     let p = p.context("Missing index name")?;
@@ -157,7 +157,7 @@ fn index_name_from_proto(
     }
 }
 
-fn field_path_from_proto(p: Option<pb::common::FieldPath>) -> anyhow::Result<FieldPath> {
+pub(crate) fn field_path_from_proto(p: Option<pb::common::FieldPath>) -> anyhow::Result<FieldPath> {
     FieldPath::try_from(p.context("Missing field_path")?)
 }
 

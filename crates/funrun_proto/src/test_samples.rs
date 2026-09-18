@@ -101,6 +101,16 @@ fn sample_path_and_args() -> ValidatedPathAndArgs {
     .expect("sample ValidatedPathAndArgs proto should convert")
 }
 
+pub fn sample_context() -> ExecutionContext {
+    ExecutionContext::new_from_parts(
+        RequestId::new(),
+        ExecutionId::new(),
+        None,
+        true,
+        RequestMetadata::system(),
+    )
+}
+
 pub fn sample_run_request_parts() -> RunRequestParts {
     let mut default_system_env_vars = BTreeMap::new();
     default_system_env_vars.insert(
@@ -133,13 +143,7 @@ pub fn sample_run_request_parts() -> RunRequestParts {
         http: None,
         default_system_env_vars,
         in_memory_index_last_modified,
-        context: ExecutionContext::new_from_parts(
-            RequestId::new(),
-            ExecutionId::new(),
-            None,
-            true,
-            RequestMetadata::system(),
-        ),
+        context: sample_context(),
         bootstrap_metadata: BootstrapMetadata {
             tables_by_id: IndexRef::from_parts(
                 IndexId(InternalId::from([1u8; 16])),
@@ -167,7 +171,7 @@ pub fn sample_tablet() -> TabletId {
     TabletId(InternalId::from([6u8; 16]))
 }
 
-fn field_path(name: &str) -> FieldPath {
+pub fn field_path(name: &str) -> FieldPath {
     FieldPath::new(vec![name.parse().unwrap()]).unwrap()
 }
 

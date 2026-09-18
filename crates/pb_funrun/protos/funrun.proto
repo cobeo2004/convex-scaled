@@ -6,6 +6,7 @@ import "common.proto";
 import "convex_identity.proto";
 import "convex_query_journal.proto";
 import "outcome.proto";
+import "searchlight.proto";
 import "storage.proto";
 import "usage.proto";
 
@@ -198,7 +199,7 @@ message IndexPageRequest {
   uint64 ts = 1;
   IndexRef index = 2;
   bytes tablet_id = 3;
-  repeated common.Interval interval = 4; // exactly one element
+  repeated common.Interval interval = 4; // at most one element; none = empty
   common.Order order = 5;
   uint64 max_results = 6;
 }
@@ -217,20 +218,35 @@ message IndexPageResponse {
 
 message TextSearchRequest {
   uint64 ts = 1;
-  bytes index_id = 2;
-  // InternalSearch and SearchVersion carried as JSON produced by the Rust
-  // types' existing serde/JSON conversions (see Task 4).
-  string internal_search_json = 3;
-  string search_version = 4;
+  bytes index_id = 2; // the conductor resolves the Index itself
+  InternalSearch search = 3;
+  SearchVersion version = 4;
   repeated common.DocumentUpdate pending_updates = 5;
 }
 
+// Mirrors common::query::InternalSearch (no serde impl upstream).
+message InternalSearch {
+  TabletIndexName index_name = 1;
+  string table_name = 2;
+  repeated InternalSearchFilter filters = 3;
+}
+
+message InternalSearchFilter {
+  common.FieldPath field_path = 1;
+  oneof filter {
+    string search = 2;
+    bytes eq = 3; // FilterValue bytes as-is
+  }
+}
+
+enum SearchVersion {
+  SEARCH_VERSION_V1 = 0;
+  SEARCH_VERSION_V2 = 1;
+}
+
 message CandidateRevisionWithKey {
-  float score = 1;
-  bytes id = 2;          // InternalDocumentId bytes
-  uint64 ts = 3;
-  double creation_time = 4;
-  bytes index_key = 5;
+  searchlight.CandidateRevision revision = 1;
+  bytes index_key = 2;
 }
 
 message TextSearchResponse {
@@ -259,7 +275,7 @@ message ActionCallbackRequest {
     string vector_search_json = 11;     // JsonValue
     string lookup_function_handle = 12; // FunctionHandle string
     ComponentFunctionPath create_function_handle = 13;
-    string create_ai_gateway_token_caller_json = 14;
+    AttributedCaller create_ai_gateway_token = 14;
   }
 }
 
@@ -279,6 +295,52 @@ message StoreFileEntry {
   storage.FileStorageEntry entry = 2;
 }
 
+message ScheduleJob {
+  optional string scheduling_component_id = 1;
+  ComponentFunctionPath scheduled_path = 2;
+  string args_json = 3;
+  uint64 scheduled_ts_nanos = 4;
+  common.ExecutionContext context = 5;
+}
+
+// Mirrors common::types::AttributedCaller.
+message AttributedCaller {
+  string component_path = 1; // ComponentPath string form, "" = root
+  oneof caller {
+    string action_udf_path = 2;
+    HttpActionRoute http_action_route = 3;
+  }
+}
+
+message HttpActionRoute {
+  string method = 1;
+  string path = 2;
+  bool matched = 3;
+}
+
+// One variant per ActionCallbacks method, same order as the request.
+message ActionCallbackResponse {
+  oneof result {
+    common.FunctionResult execute_query = 2;
+    common.FunctionResult execute_mutation = 3;
+    common.FunctionResult execute_action = 4;
+    OptionalString storage_get_url = 5;
+    Unit storage_delete = 6;
+    OptionalFileEntry storage_get_file_entry = 7;
+    StoredFile storage_store_file_entry = 8;
+    string schedule_job = 9;            // DeveloperDocumentId encoded string
+    Unit cancel_job = 10;
+    VectorSearchResults vector_search = 11;
+    ComponentFunctionPath lookup_function_handle = 12;
+    string create_function_handle = 13; // FunctionHandle string
+    string create_ai_gateway_token = 14;
+  }
+}
+
+message OptionalString {
+  optional string value = 1;
+}
+
 // Option<(ComponentPath, FileStorageEntry)>: `entry` unset = None.
 message OptionalFileEntry {
   FileEntry entry = 1;
@@ -289,28 +351,19 @@ message FileEntry {
   storage.FileStorageEntry entry = 2;
 }
 
-message ScheduleJob {
-  optional string scheduling_component_id = 1;
-  ComponentFunctionPath scheduled_path = 2;
-  string args_json = 3;
-  uint64 scheduled_ts_nanos = 4;
-  common.ExecutionContext context = 5;
+message StoredFile {
+  string component_path = 1;
+  string document_id = 2; // DeveloperDocumentId encoded string
 }
 
-message ActionCallbackResponse {
-  oneof result {
-    common.FunctionResult function_result = 1;
-    string optional_string_json = 2; // Option<String> as JSON
-    Unit unit = 3;
-    OptionalFileEntry file_entry = 4;
-    string stored_file_json = 5;     // (ComponentPath, DeveloperDocumentId)
-    string document_id = 6;          // DeveloperDocumentId encoded string
-    string vector_results_json = 7;  // (Vec<PublicVectorSearchQueryResult>, FunctionUsageStats) minus stats
-    usage.FunctionUsageStats vector_usage = 8;
-    ComponentFunctionPath function_path = 9;
-    string function_handle = 10;
-    string token = 11;
-  }
+message VectorSearchResults {
+  repeated VectorSearchResult results = 1;
+  usage.FunctionUsageStats usage = 2;
+}
+
+message VectorSearchResult {
+  float score = 1;
+  string id = 2; // DeveloperDocumentId encoded string
 }
 
 message Unit {}
