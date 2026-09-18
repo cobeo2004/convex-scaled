@@ -37,6 +37,7 @@ use udf::{
 use value::TabletId;
 
 use crate::{
+    collect_unique,
     ids::{
         index_ref_from_proto,
         index_ref_to_proto,
@@ -237,16 +238,15 @@ pub fn run_request_from_proto(
     let table_counts = proto
         .table_counts
         .map(|counts| {
-            counts
-                .tables
-                .into_iter()
-                .map(|table_count| {
+            collect_unique(
+                "table_counts",
+                counts.tables.into_iter().map(|table_count| {
                     anyhow::Ok((
                         tablet_id_from_bytes(&table_count.tablet_id)?,
                         table_count.count,
                     ))
-                })
-                .collect::<anyhow::Result<BTreeMap<_, _>>>()
+                }),
+            )
         })
         .transpose()?;
     let default_system_env_vars = proto
@@ -256,19 +256,34 @@ pub fn run_request_from_proto(
             anyhow::Ok((EnvVarName::from_str(&name)?, EnvVarValue::from_str(&value)?))
         })
         .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
-    let in_memory_index_last_modified = proto
-        .in_memory_index_last_modified
-        .into_iter()
-        .map(|entry| {
-            anyhow::Ok((
-                crate::ids::index_id_from_bytes(&entry.index_id)?,
-                Timestamp::try_from(entry.last_modified)?,
-            ))
-        })
-        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+    let in_memory_index_last_modified = collect_unique(
+        "in_memory_index_last_modified",
+        proto
+            .in_memory_index_last_modified
+            .into_iter()
+            .map(|entry| {
+                anyhow::Ok((
+                    crate::ids::index_id_from_bytes(&entry.index_id)?,
+                    Timestamp::try_from(entry.last_modified)?,
+                ))
+            }),
+    )?;
+    let udf_type = udf_type_from_proto(proto.udf_type)?;
+    // Mirrors what the upstream function runner server requires per type.
+    match udf_type {
+        UdfType::Query | UdfType::Mutation | UdfType::Action => {
+            anyhow::ensure!(
+                function_metadata.is_some() && http.is_none(),
+                "{udf_type:?} requires function metadata and no http metadata"
+            );
+        },
+        UdfType::HttpAction => {
+            anyhow::ensure!(http.is_some(), "HttpAction requires http metadata");
+        },
+    }
     Ok(RunRequestParts {
         instance_name: proto.instance_name,
-        udf_type: udf_type_from_proto(proto.udf_type)?,
+        udf_type,
         identity: Identity::from_proto_unchecked(proto.identity.context("Missing identity")?)?,
         ts: repeatable_ts_from_u64(proto.ts)?,
         existing_writes: writes_from_proto(
@@ -308,6 +323,40 @@ mod tests {
         let back = run_request_from_proto(proto.clone()).unwrap();
         // Compare via proto encoding: many upstream types lack PartialEq.
         assert_eq!(run_request_to_proto(&back).unwrap(), proto);
+    }
+
+    #[test]
+    fn http_action_run_request_round_trips() {
+        let parts = crate::test_samples::sample_http_run_request_parts();
+        let proto = run_request_to_proto(&parts).unwrap();
+        let head = &proto.http.as_ref().unwrap().head.as_ref().unwrap();
+        assert_eq!(
+            head.http_headers
+                .iter()
+                .filter(|h| h.key == "x-multi")
+                .count(),
+            2
+        );
+        let back = run_request_from_proto(proto.clone()).unwrap();
+        assert_eq!(run_request_to_proto(&back).unwrap(), proto);
+    }
+
+    #[test]
+    fn http_metadata_on_non_http_request_is_an_error() {
+        let mut proto =
+            run_request_to_proto(&crate::test_samples::sample_http_run_request_parts()).unwrap();
+        proto.udf_type = pb::common::UdfType::Mutation as i32;
+        let err = run_request_from_proto(proto).err().unwrap();
+        assert!(err.to_string().contains("no http metadata"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_table_count_is_an_error() {
+        let mut proto = run_request_to_proto(&sample()).unwrap();
+        let counts = proto.table_counts.as_mut().unwrap();
+        counts.tables.push(counts.tables[0].clone());
+        let err = run_request_from_proto(proto).err().unwrap();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
     #[test]

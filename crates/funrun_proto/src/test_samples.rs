@@ -16,6 +16,7 @@ use common::{
         RequestId,
         RequestMetadata,
     },
+    http::RoutedHttpPath,
     identity::InertIdentity,
     interval::{
         BinaryKey,
@@ -62,8 +63,12 @@ use search::{
     TextQueryTermRead,
 };
 use udf::{
-    validation::ValidatedPathAndArgs,
+    validation::{
+        ValidatedHttpPath,
+        ValidatedPathAndArgs,
+    },
     FunctionOutcome,
+    HttpActionRequestHead,
     SyscallTrace,
 };
 use usage_tracking::FunctionUsageStats;
@@ -79,7 +84,10 @@ use value::{
     TabletId,
 };
 
-use crate::request::RunRequestParts;
+use crate::request::{
+    HttpRequestParts,
+    RunRequestParts,
+};
 
 fn sample_path_and_args() -> ValidatedPathAndArgs {
     ValidatedPathAndArgs::from_proto(pb::common::ValidatedPathAndArgs {
@@ -286,4 +294,40 @@ pub fn sample_query_result() -> (
         sample_path_and_args(),
         InertIdentity::System,
     )
+}
+
+/// An `HttpAction` request with one header carrying two values.
+pub fn sample_http_run_request_parts() -> RunRequestParts {
+    let head = pb::common::HttpActionRequestHead {
+        http_headers: vec![
+            pb::common::HttpHeader {
+                key: "x-multi".to_string(),
+                value: b"a".to_vec(),
+            },
+            pb::common::HttpHeader {
+                key: "x-multi".to_string(),
+                value: b"b".to_vec(),
+            },
+        ],
+        url: "http://127.0.0.1:3211/hello".to_string(),
+        method: "POST".to_string(),
+    };
+    RunRequestParts {
+        udf_type: UdfType::HttpAction,
+        function_metadata: None,
+        http: Some(HttpRequestParts {
+            http_module_path: ValidatedHttpPath::from_proto(pb::common::ValidatedHttpPath {
+                path: Some("http.js".to_string()),
+                component_path: Some(pb::common::ComponentPath::default()),
+                component_id: None,
+                npm_version: None,
+                reuse_context: None,
+            })
+            .unwrap(),
+            routed_path: RoutedHttpPath("/hello".to_string()),
+            head: HttpActionRequestHead::try_from(head).unwrap(),
+            has_body: true,
+        }),
+        ..sample_run_request_parts()
+    }
 }

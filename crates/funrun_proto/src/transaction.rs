@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::Context;
 use common::{
     bootstrap_model::index::database_index::IndexedFields,
@@ -39,9 +37,12 @@ use udf::{
 use usage_tracking::FunctionUsageStats;
 use value::FieldPath;
 
-use crate::ids::{
-    tablet_id_from_bytes,
-    tablet_id_to_bytes,
+use crate::{
+    collect_unique,
+    ids::{
+        tablet_id_from_bytes,
+        tablet_id_to_bytes,
+    },
 };
 
 pub fn writes_to_proto(w: &FunctionWrites) -> anyhow::Result<pb_funrun::funrun::Writes> {
@@ -111,11 +112,12 @@ pub fn final_transaction_from_proto(
             )?,
         },
         writes: writes_from_proto(p.writes.context("Missing writes")?)?,
-        rows_read_by_tablet: p
-            .rows_read_by_tablet
-            .into_iter()
-            .map(|r| Ok((tablet_id_from_bytes(&r.tablet_id)?, r.rows)))
-            .collect::<anyhow::Result<BTreeMap<_, _>>>()?,
+        rows_read_by_tablet: collect_unique(
+            "rows_read_by_tablet",
+            p.rows_read_by_tablet
+                .into_iter()
+                .map(|r| Ok((tablet_id_from_bytes(&r.tablet_id)?, r.rows))),
+        )?,
     })
 }
 
@@ -180,10 +182,9 @@ pub fn read_set_to_proto(rs: &ReadSet) -> anyhow::Result<pb_funrun::funrun::Read
 }
 
 pub fn read_set_from_proto(p: pb_funrun::funrun::ReadSet) -> anyhow::Result<ReadSet> {
-    let indexed = p
-        .indexed
-        .into_iter()
-        .map(|r| {
+    let indexed = collect_unique(
+        "indexed read set",
+        p.indexed.into_iter().map(|r| {
             let fields = r
                 .fields
                 .into_iter()
@@ -198,18 +199,17 @@ pub fn read_set_from_proto(p: pb_funrun::funrun::ReadSet) -> anyhow::Result<Read
                 stack_traces: None,
             };
             Ok((index_name_from_proto(r.index)?, reads))
-        })
-        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
-    let search = p
-        .search
-        .into_iter()
-        .map(|r| {
+        }),
+    )?;
+    let search = collect_unique(
+        "search read set",
+        p.search.into_iter().map(|r| {
             Ok((
                 index_name_from_proto(r.index)?,
                 query_reads_from_proto(r.reads.context("Missing query reads")?)?,
             ))
-        })
-        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        }),
+    )?;
     Ok(ReadSet::new(indexed, search))
 }
 
@@ -288,28 +288,32 @@ pub fn run_result_to_proto(
     })
 }
 
+/// A decoded `RunResult`.
+pub struct RunResultParts {
+    pub transaction: Option<FunctionFinalTransaction>,
+    pub outcome: FunctionOutcome,
+    pub usage: FunctionUsageStats,
+}
+
 pub fn run_result_from_proto(
     p: pb_funrun::funrun::RunResult,
     path_and_args: Option<ValidatedPathAndArgs>,
     http: Option<(ValidatedHttpPath, HttpActionRequestHead)>,
     identity: InertIdentity,
-) -> anyhow::Result<(
-    Option<FunctionFinalTransaction>,
-    FunctionOutcome,
-    FunctionUsageStats,
-)> {
-    Ok((
-        p.transaction
+) -> anyhow::Result<RunResultParts> {
+    Ok(RunResultParts {
+        transaction: p
+            .transaction
             .map(final_transaction_from_proto)
             .transpose()?,
-        FunctionOutcome::from_proto(
+        outcome: FunctionOutcome::from_proto(
             p.outcome.context("Missing outcome")?,
             path_and_args,
             http,
             identity,
         )?,
-        p.usage.context("Missing usage")?.try_into()?,
-    ))
+        usage: p.usage.context("Missing usage")?.try_into()?,
+    })
 }
 
 #[cfg(test)]
@@ -381,9 +385,30 @@ mod tests {
     fn run_result_round_trips_query_outcome() {
         let (tx, outcome, usage, path_and_args, identity) = sample_query_result();
         let proto = run_result_to_proto(Some(tx), outcome, usage).unwrap();
-        let (tx2, outcome2, _) =
-            run_result_from_proto(proto, Some(path_and_args), None, identity).unwrap();
-        assert!(tx2.is_some());
-        assert!(matches!(outcome2, FunctionOutcome::Query(_)));
+        let back =
+            run_result_from_proto(proto.clone(), Some(path_and_args), None, identity).unwrap();
+        assert!(matches!(back.outcome, FunctionOutcome::Query(_)));
+        assert_eq!(
+            run_result_to_proto(back.transaction, back.outcome, back.usage).unwrap(),
+            proto
+        );
+    }
+
+    #[test]
+    fn duplicate_index_reads_entry_is_an_error() {
+        let mut proto = read_set_to_proto(&sample_read_set()).unwrap();
+        proto.indexed.push(proto.indexed[0].clone());
+        let err = read_set_from_proto(proto).err().unwrap();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_rows_read_by_tablet_is_an_error() {
+        let mut proto = final_transaction_to_proto(&sample_final_transaction()).unwrap();
+        proto
+            .rows_read_by_tablet
+            .push(proto.rows_read_by_tablet[0].clone());
+        let err = final_transaction_from_proto(proto).err().unwrap();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 }

@@ -6,6 +6,7 @@ import "common.proto";
 import "convex_identity.proto";
 import "convex_query_journal.proto";
 import "outcome.proto";
+import "storage.proto";
 import "usage.proto";
 
 // ---------------------------------------------------------------------------
@@ -270,12 +271,22 @@ message ExecuteUdf {
 
 message StorageRef {
   optional string component_id = 1; // None = root component
-  string storage_id = 2;            // FileStorageId string form
+  storage.FileStorageId storage_id = 2;
 }
 
 message StoreFileEntry {
   optional string component_id = 1;
-  string entry_json = 2; // FileStorageEntry
+  storage.FileStorageEntry entry = 2;
+}
+
+// Option<(ComponentPath, FileStorageEntry)>: `entry` unset = None.
+message OptionalFileEntry {
+  FileEntry entry = 1;
+}
+
+message FileEntry {
+  string component_path = 1; // ComponentPath string form, "" = root
+  storage.FileStorageEntry entry = 2;
 }
 
 message ScheduleJob {
@@ -291,7 +302,7 @@ message ActionCallbackResponse {
     common.FunctionResult function_result = 1;
     string optional_string_json = 2; // Option<String> as JSON
     Unit unit = 3;
-    string file_entry_json = 4;      // Option<(ComponentPath, FileStorageEntry)>
+    OptionalFileEntry file_entry = 4;
     string stored_file_json = 5;     // (ComponentPath, DeveloperDocumentId)
     string document_id = 6;          // DeveloperDocumentId encoded string
     string vector_results_json = 7;  // (Vec<PublicVectorSearchQueryResult>, FunctionUsageStats) minus stats
