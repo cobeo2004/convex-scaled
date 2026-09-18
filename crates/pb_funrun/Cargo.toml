@@ -1,0 +1,25 @@
+[package]
+name = "pb_funrun"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-FSL-1.1-Apache-2.0"
+
+[package.metadata.cargo-machete]
+ignored = ["pb_build", "pb", "pb_extras", "prost", "tonic-prost"]
+
+[lib]
+doctest = false
+
+[dependencies]
+pb = { workspace = true }
+pb_extras = { workspace = true }
+prost = { workspace = true }
+prost-reflect = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+pb_build = { workspace = true }
+
+[lints]
+workspace = true

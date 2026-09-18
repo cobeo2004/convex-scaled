@@ -7367,6 +7367,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pb_funrun"
+version = "0.1.0"
+dependencies = [
+ "pb",
+ "pb_build",
+ "pb_extras",
+ "prost 0.14.3",
+ "prost-reflect",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
