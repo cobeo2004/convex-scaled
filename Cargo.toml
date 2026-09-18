@@ -92,6 +92,7 @@ fnv = "1.0.7"
 function_host = { path = "crates/function_host" }
 function_runner = { path = "crates/function_runner" }
 funrun_proto = { path = "crates/funrun_proto" }
+funrun_worker = { path = "crates/funrun_worker" }
 futures = "0.3"
 futures-async-stream = "0.2.11"
 futures-util = "0.3.30"

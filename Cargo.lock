@@ -4165,6 +4165,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "funrun_worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "common",
+ "convex_sync_types",
+ "database",
+ "errors",
+ "function_host",
+ "funrun_proto",
+ "indexing",
+ "keybroker",
+ "metrics",
+ "model",
+ "pb",
+ "pb_funrun",
+ "search",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "udf",
+ "usage_tracking",
+ "value",
+ "vector",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
