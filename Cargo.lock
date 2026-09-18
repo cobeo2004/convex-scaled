@@ -8588,6 +8588,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "remote_function_runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap",
+ "common",
+ "convex_sync_types",
+ "database",
+ "errors",
+ "function_runner",
+ "funrun_proto",
+ "futures",
+ "keybroker",
+ "model",
+ "parking_lot",
+ "pb",
+ "pb_funrun",
+ "rand 0.9.4",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "udf",
+ "usage_tracking",
+ "value",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

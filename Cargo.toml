@@ -181,6 +181,7 @@ rand_chacha = "0.9.0"
 rc-zip = { version = "5", features = [ "deflate", "deflate64", "zstd" ] }
 ref-cast = "1.0.20"
 regex = "1"
+remote_function_runner = { path = "crates/remote_function_runner" }
 reqwest = { version = "0.13", features = [ "json", "query", "stream", "gzip", "rustls" ] }
 reqwest-middleware = "0.5.1"
 roles = { path = "crates/roles" }
