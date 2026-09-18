@@ -19,8 +19,10 @@ pub struct WorkerState {
     pub healthy: bool,
 }
 
-// Rendezvous hashing: adding a worker moves ~1/N of modules. DefaultHasher is
-// only stable within one process, which is fine: only the conductor hashes.
+// Rendezvous hashing: adding a worker moves ~1/N of modules.
+// `DefaultHasher::new()` is unkeyed, so scores are stable across processes of
+// the same build (not across Rust versions), which is enough: only the
+// conductor hashes.
 fn score(module: &str, addr: &str) -> u64 {
     let mut h = DefaultHasher::new();
     (module, addr).hash(&mut h);

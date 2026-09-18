@@ -32,15 +32,19 @@ use tonic::{
     transport::Channel,
 };
 
-use crate::pick::{
-    pick,
-    WorkerState,
+use crate::{
+    pick::{
+        pick,
+        WorkerState,
+    },
+    retry::is_transport_failure,
 };
 
 pub type FunrunChannel = FunrunClient<InterceptedService<Channel, BearerInterceptor>>;
 
 const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum RoutingMode {
@@ -197,31 +201,39 @@ impl WorkerPool {
         addr: String,
         mut client: FunrunChannel,
     ) {
+        let mut delay = RECONNECT_DELAY;
         loop {
             match client.watch_load(WatchLoadRequest {}).await {
                 Ok(response) => {
                     let mut reports = response.into_inner();
                     loop {
                         match reports.message().await {
-                            Ok(Some(report)) => self.update(&addr, |s| {
-                                s.load = report.effective_load;
-                                s.healthy = true;
-                            }),
+                            Ok(Some(report)) => {
+                                delay = RECONNECT_DELAY;
+                                self.update(&addr, |s| {
+                                    s.load = report.effective_load;
+                                    s.healthy = true;
+                                });
+                            },
                             Ok(None) => {
                                 tracing::warn!("funrun worker {addr} ended WatchLoad");
                                 break;
                             },
                             Err(status) => {
                                 tracing::warn!("funrun worker {addr} WatchLoad failed: {status}");
+                                delay = reconnect_delay(delay, &status);
                                 break;
                             },
                         }
                     }
                 },
-                Err(status) => tracing::warn!("funrun worker {addr} unreachable: {status}"),
+                Err(status) => {
+                    tracing::warn!("funrun worker {addr} unreachable: {status}");
+                    delay = reconnect_delay(delay, &status);
+                },
             }
             self.update(&addr, |s| s.healthy = false);
-            rt.wait(RECONNECT_DELAY).await;
+            rt.wait(delay).await;
         }
     }
 
@@ -244,6 +256,16 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Reconnects quickly after a lost connection, but backs off exponentially
+/// when the worker keeps rejecting the call (e.g. a wrong token).
+fn reconnect_delay(delay: Duration, status: &tonic::Status) -> Duration {
+    if is_transport_failure(status) {
+        RECONNECT_DELAY
+    } else {
+        (delay * 2).min(MAX_RECONNECT_DELAY)
+    }
+}
+
 /// Same channel settings as the worker's `connect_host`.
 fn connect(addr: &str, token: String) -> anyhow::Result<FunrunChannel> {
     let channel = Channel::from_shared(format!("http://{addr}"))?
@@ -261,4 +283,36 @@ fn connect(addr: &str, token: String) -> anyhow::Result<FunrunChannel> {
 #[cfg(test)]
 pub(crate) fn connect_for_test(addr: &str) -> FunrunChannel {
     connect(addr, "test-token".to_string()).expect("valid address")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tonic::Status;
+
+    use super::{
+        reconnect_delay,
+        MAX_RECONNECT_DELAY,
+        RECONNECT_DELAY,
+    };
+
+    #[test]
+    fn rejected_watch_load_backs_off_up_to_the_cap() {
+        let rejected = Status::unauthenticated("bad token");
+        let mut delay = RECONNECT_DELAY;
+        let mut delays = vec![];
+        for _ in 0..7 {
+            delay = reconnect_delay(delay, &rejected);
+            delays.push(delay.as_secs());
+        }
+        assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(MAX_RECONNECT_DELAY, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn lost_connection_reconnects_quickly() {
+        let lost = Status::unavailable("connection reset");
+        assert_eq!(reconnect_delay(MAX_RECONNECT_DELAY, &lost), RECONNECT_DELAY);
+    }
 }

@@ -8,6 +8,7 @@ use std::{
         BTreeSet,
     },
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -128,6 +129,7 @@ use crate::{
         failure_stage,
         is_transport_failure,
         may_retry,
+        Delivery,
         FailureStage,
     },
 };
@@ -251,6 +253,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             log_line_sender.as_ref(),
             http_response.as_mut(),
             http_body,
+            *FUNRUN_RUN_FUNCTION_TIMEOUT,
         )
         .await
         .and_then(|result| {
@@ -355,7 +358,8 @@ struct AttemptFailure {
 }
 
 /// Runs `request` on a worker, retrying on other workers only when
-/// `may_retry` allows it.
+/// `may_retry` allows it. Each attempt gets `run_timeout`; the gRPC deadline
+/// alone only bounds the response headers, which the worker sends at once.
 async fn execute_with_retries(
     pool: &Arc<WorkerPool>,
     module: &str,
@@ -364,6 +368,7 @@ async fn execute_with_retries(
     log_line_sender: Option<&mpsc::UnboundedSender<LogLine>>,
     mut http_response: Option<&mut HttpActionResponseStreamer>,
     mut http_body: Option<BodyStream>,
+    run_timeout: Duration,
 ) -> anyhow::Result<RunResult> {
     let module_header =
         AsciiMetadataValue::try_from(module).context("module path is not a valid header")?;
@@ -382,17 +387,28 @@ async fn execute_with_retries(
             ));
         };
         let _in_flight = pool.begin(&addr);
-        let failure = match execute_once(
-            client,
-            udf_type,
-            module_header.clone(),
-            request.clone(),
-            log_line_sender,
-            http_response.as_deref_mut(),
-            &mut http_body,
+        let attempt_result = tokio::time::timeout(
+            run_timeout,
+            execute_once(
+                client,
+                udf_type,
+                module_header.clone(),
+                request.clone(),
+                log_line_sender,
+                http_response.as_deref_mut(),
+                &mut http_body,
+            ),
         )
-        .await?
-        {
+        .await
+        // Final for every UdfType: the run may still have side effects in
+        // flight. Dropping the call cancels it on the worker.
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "funrun worker {addr} did not finish {udf_type:?} in {module} within \
+                 {run_timeout:?}"
+            )
+        })??;
+        let failure = match attempt_result {
             Ok(result) => return Ok(result),
             Err(failure) => failure,
         };
@@ -431,9 +447,8 @@ async fn execute_once(
         Ok(response) => response.into_inner(),
         // The worker never received the RunRequest: it is not sent yet.
         Err(status) if is_transport_failure(&status) => {
-            let stage = failure_stage(udf_type, false, false, false);
             return Ok(Err(AttemptFailure {
-                stage,
+                stage: failure_stage(udf_type, Delivery::NotSent),
                 error: status.into_anyhow(),
             }));
         },
@@ -443,10 +458,10 @@ async fn execute_once(
         inner: Some(Up::Request(request)),
     };
     // A failed send means the call already ended and the RunRequest was not
-    // handed to it, so nothing was sent (`request_sent = false`).
+    // handed to it, so nothing was sent.
     if up_tx.send(request).await.is_err() {
         return Ok(Err(AttemptFailure {
-            stage: failure_stage(udf_type, false, false, false),
+            stage: failure_stage(udf_type, Delivery::NotSent),
             error: anyhow::anyhow!("funrun Execute stream closed before the RunRequest was sent"),
         }));
     }
@@ -457,9 +472,12 @@ async fn execute_once(
     // Flips only on the worker's `Started`. Actions count as started even
     // before it (see `failure_stage`).
     let mut started = false;
-    let lost = |started: bool, error: anyhow::Error| AttemptFailure {
-        stage: failure_stage(udf_type, true, false, started),
-        error,
+    let lost = |started: bool| {
+        if started {
+            Delivery::LostAfterStarted
+        } else {
+            Delivery::LostBeforeStarted
+        }
     };
     loop {
         tokio::select! {
@@ -471,12 +489,17 @@ async fn execute_once(
             frame = down.message() => {
                 let inner = match frame {
                     Err(status) if is_transport_failure(&status) => {
-                        return Ok(Err(lost(started, status.into_anyhow())));
+                        return Ok(Err(AttemptFailure {
+                            stage: failure_stage(udf_type, lost(started)),
+                            error: status.into_anyhow(),
+                        }));
                     },
                     Err(status) => return Err(status.into_anyhow()),
                     Ok(None) => {
-                        let error = anyhow::anyhow!("funrun Execute stream ended without a result");
-                        return Ok(Err(lost(started, error)));
+                        return Ok(Err(AttemptFailure {
+                            stage: failure_stage(udf_type, lost(started)),
+                            error: anyhow::anyhow!("funrun Execute stream ended without a result"),
+                        }));
                     },
                     Ok(Some(ExecuteDown { inner })) => inner.context("empty ExecuteDown frame")?,
                 };
@@ -507,9 +530,16 @@ async fn execute_once(
                         }
                     },
                     Down::Overloaded(Overloaded { reason }) => {
+                        // Sent only instead of starting; after `Started` it
+                        // is a lost call like any other.
+                        let delivery = if started {
+                            Delivery::LostAfterStarted
+                        } else {
+                            Delivery::Refused
+                        };
                         let error = ErrorMetadata::overloaded("FunrunWorkerOverloaded", reason);
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, true, true, started),
+                            stage: failure_stage(udf_type, delivery),
                             error: error.into(),
                         }));
                     },
@@ -564,14 +594,17 @@ mod tests {
         time::Duration,
     };
 
+    use bytes::Bytes;
     use common::{
         grpc::ConvexGrpcService,
         types::UdfType,
     };
+    use errors::ErrorMetadataAnyhowExt;
     use futures::{
         stream::BoxStream,
         StreamExt,
     };
+    use parking_lot::Mutex;
     use pb_funrun::funrun::{
         execute_down::Inner as Down,
         execute_up::Inner as Up,
@@ -579,6 +612,7 @@ mod tests {
             Funrun,
             FunrunServer,
         },
+        BodyChunk,
         ExecuteDown,
         ExecuteUp,
         LoadReport,
@@ -588,15 +622,22 @@ mod tests {
         Started,
         WatchLoadRequest,
     };
-    use tokio::net::{
-        TcpSocket,
-        TcpStream,
+    use tokio::{
+        net::{
+            TcpSocket,
+            TcpStream,
+        },
+        sync::mpsc,
     };
     use tonic::{
         Request,
         Response,
         Status,
         Streaming,
+    };
+    use udf::{
+        HttpActionResponsePart,
+        HttpActionResponseStreamer,
     };
 
     use super::execute_with_retries;
@@ -607,9 +648,22 @@ mod tests {
 
     type Frame = Result<Down, Status>;
 
-    /// `Ok(frames)`: answer with headers at once, like the real worker, then
-    /// read the RunRequest and send `frames`. `Err(status)`: reject the call.
-    type Script = fn(usize) -> Result<Vec<Frame>, Status>;
+    /// Long enough that only the run-timeout test ever hits it.
+    const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+
+    enum Step {
+        Send(Frame),
+        /// Counts an up frame arriving within 100ms as early.
+        ExpectQuiet,
+        /// Records request body chunks up to `end = true`.
+        ReadBody,
+        /// Never sends anything again.
+        Stall,
+    }
+
+    /// `Ok(steps)`: answer with headers at once, like the real worker, then
+    /// read the RunRequest and play `steps`. `Err(status)`: reject the call.
+    type Script = fn(usize) -> Result<Vec<Step>, Status>;
 
     /// Answers the n-th Execute call (from 0) with `script(n)`, counting calls
     /// and RunRequests received.
@@ -617,6 +671,8 @@ mod tests {
     struct FakeWorker {
         calls: Arc<AtomicUsize>,
         requests: Arc<AtomicUsize>,
+        early: Arc<AtomicUsize>,
+        bodies: Arc<Mutex<Vec<BodyChunk>>>,
         script: Script,
     }
 
@@ -651,14 +707,51 @@ mod tests {
                     .await;
                     Err(status)
                 },
-                Ok(frames) => {
-                    let frames: Vec<_> = frames
-                        .into_iter()
-                        .map(|frame| frame.map(|inner| ExecuteDown { inner: Some(inner) }))
-                        .collect();
+                Ok(steps) => {
+                    let fake = self.clone();
                     let stream = futures::stream::once(async move {
                         read_request(&mut up, &requests).await;
-                        futures::stream::iter(frames)
+                        futures::stream::unfold(
+                            (up, steps.into_iter()),
+                            move |(mut up, mut steps)| {
+                                let fake = fake.clone();
+                                async move {
+                                    loop {
+                                        match steps.next()? {
+                                            Step::Send(frame) => {
+                                                let down = frame.map(|inner| ExecuteDown {
+                                                    inner: Some(inner),
+                                                });
+                                                return Some((down, (up, steps)));
+                                            },
+                                            Step::ExpectQuiet => {
+                                                let early = tokio::time::timeout(
+                                                    Duration::from_millis(100),
+                                                    up.message(),
+                                                )
+                                                .await;
+                                                if let Ok(Ok(Some(_))) = early {
+                                                    fake.early.fetch_add(1, Ordering::SeqCst);
+                                                }
+                                            },
+                                            Step::ReadBody => {
+                                                while let Ok(Some(ExecuteUp {
+                                                    inner: Some(Up::HttpRequestBody(chunk)),
+                                                })) = up.message().await
+                                                {
+                                                    let end = chunk.end;
+                                                    fake.bodies.lock().push(chunk);
+                                                    if end {
+                                                        break;
+                                                    }
+                                                }
+                                            },
+                                            Step::Stall => std::future::pending::<()>().await,
+                                        }
+                                    }
+                                }
+                            },
+                        )
                     })
                     .flatten();
                     Ok(Response::new(Box::pin(stream)))
@@ -683,6 +776,8 @@ mod tests {
         let fake = FakeWorker {
             calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(AtomicUsize::new(0)),
+            early: Arc::new(AtomicUsize::new(0)),
+            bodies: Arc::new(Mutex::new(Vec::new())),
             script,
         };
         let socket = TcpSocket::new_v4().unwrap();
@@ -725,45 +820,78 @@ mod tests {
             None,
             None,
             None,
+            RUN_TIMEOUT,
         )
         .await
     }
 
-    fn overloaded(_: usize) -> Result<Vec<Frame>, Status> {
-        Ok(vec![Ok(Down::Overloaded(Overloaded {
+    fn overloaded(_: usize) -> Result<Vec<Step>, Status> {
+        Ok(vec![Step::Send(Ok(Down::Overloaded(Overloaded {
             reason: "full".into(),
-        }))])
+        })))])
     }
 
-    fn succeeds(_: usize) -> Result<Vec<Frame>, Status> {
+    fn succeeds(_: usize) -> Result<Vec<Step>, Status> {
         Ok(vec![
-            Ok(Down::Started(Started {})),
-            Ok(Down::Result(RunResult::default())),
+            Step::Send(Ok(Down::Started(Started {}))),
+            Step::Send(Ok(Down::Result(RunResult::default()))),
         ])
     }
 
-    fn drops_after_start(_: usize) -> Result<Vec<Frame>, Status> {
-        Ok(vec![Ok(Down::Started(Started {}))])
+    fn drops_after_start(_: usize) -> Result<Vec<Step>, Status> {
+        Ok(vec![Step::Send(Ok(Down::Started(Started {})))])
     }
 
-    fn drops_before_start(_: usize) -> Result<Vec<Frame>, Status> {
+    fn drops_before_start(_: usize) -> Result<Vec<Step>, Status> {
         Ok(vec![])
     }
 
-    fn fails_precondition(_: usize) -> Result<Vec<Frame>, Status> {
-        Ok(vec![Err(Status::failed_precondition("wrong deployment"))])
+    fn fails_precondition(_: usize) -> Result<Vec<Step>, Status> {
+        Ok(vec![Step::Send(Err(Status::failed_precondition(
+            "wrong deployment",
+        )))])
     }
 
-    fn rejects_call(_: usize) -> Result<Vec<Frame>, Status> {
+    fn rejects_call(_: usize) -> Result<Vec<Step>, Status> {
         Err(Status::unavailable("worker going away"))
     }
 
-    fn drops_after_start_then_succeeds(call: usize) -> Result<Vec<Frame>, Status> {
+    fn drops_after_start_then_succeeds(call: usize) -> Result<Vec<Step>, Status> {
         if call == 0 {
             drops_after_start(call)
         } else {
             succeeds(call)
         }
+    }
+
+    fn stalls_after_start(_: usize) -> Result<Vec<Step>, Status> {
+        Ok(vec![Step::Send(Ok(Down::Started(Started {}))), Step::Stall])
+    }
+
+    fn response_head() -> Frame {
+        Ok(Down::HttpResponseHead(pb::common::HttpActionResponseHead {
+            status: 200,
+            http_headers: vec![],
+        }))
+    }
+
+    fn echoes_http_body(_: usize) -> Result<Vec<Step>, Status> {
+        Ok(vec![
+            Step::ExpectQuiet,
+            Step::Send(Ok(Down::Started(Started {}))),
+            Step::ReadBody,
+            Step::Send(response_head()),
+            Step::Send(Ok(Down::HttpResponseBody(b"pong".to_vec()))),
+            Step::Send(Ok(Down::Result(RunResult::default()))),
+        ])
+    }
+
+    fn stalls_after_response_head(_: usize) -> Result<Vec<Step>, Status> {
+        Ok(vec![
+            Step::Send(Ok(Down::Started(Started {}))),
+            Step::Send(response_head()),
+            Step::Stall,
+        ])
     }
 
     #[tokio::test]
@@ -856,5 +984,98 @@ mod tests {
             format!("{err:#}").contains("no healthy funrun worker"),
             "{err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_timeout_is_final_even_for_a_query() {
+        let (addr, calls) = start_fake(stalls_after_start).await;
+        let pool = pool_of(&[&addr]);
+
+        let run = execute_with_retries(
+            &pool,
+            "m.js",
+            UdfType::Query,
+            RunRequest::default(),
+            None,
+            None,
+            None,
+            Duration::from_millis(200),
+        );
+        let err = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the run timeout should end the call")
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn http_action_streams_body_after_started_and_response_to_streamer() {
+        let (addr, fake) = start_fake_worker(echoes_http_body).await;
+        let pool = pool_of(&[&addr]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut streamer = HttpActionResponseStreamer::new(tx);
+        let body = futures::stream::iter([Ok(Bytes::from("pi")), Ok(Bytes::from("ng"))]).boxed();
+
+        let result = execute_with_retries(
+            &pool,
+            "m.js",
+            UdfType::HttpAction,
+            RunRequest::default(),
+            None,
+            Some(&mut streamer),
+            Some(body),
+            RUN_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, RunResult::default());
+        // Nothing reached the worker before it sent `Started`.
+        assert_eq!(fake.early.load(Ordering::SeqCst), 0);
+        let chunk = |data: &[u8], end| BodyChunk {
+            data: data.to_vec(),
+            end,
+        };
+        assert_eq!(
+            *fake.bodies.lock(),
+            vec![chunk(b"pi", false), chunk(b"ng", false), chunk(b"", true)]
+        );
+        assert!(
+            matches!(rx.recv().await, Some(HttpActionResponsePart::Head(h)) if h.status == 200)
+        );
+        assert!(
+            matches!(rx.recv().await, Some(HttpActionResponsePart::BodyChunk(b)) if b == "pong")
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_http_client_ends_the_run_without_retry() {
+        let (addr, calls) = start_fake(stalls_after_response_head).await;
+        let pool = pool_of(&[&addr]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut streamer = HttpActionResponseStreamer::new(tx);
+
+        let run = execute_with_retries(
+            &pool,
+            "m.js",
+            UdfType::HttpAction,
+            RunRequest::default(),
+            None,
+            Some(&mut streamer),
+            None,
+            RUN_TIMEOUT,
+        );
+        let client = async move {
+            // The client goes away mid-response, after the head.
+            assert!(rx.recv().await.is_some());
+            drop(rx);
+        };
+        let (result, ()) = tokio::join!(run, client);
+
+        let err = result.unwrap_err();
+        assert!(err.is_client_disconnect(), "{err:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

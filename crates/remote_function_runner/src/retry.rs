@@ -30,25 +30,33 @@ pub fn may_retry(
     }
 }
 
+/// How far the RunRequest got when an attempt failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// The RunRequest was never handed to the call.
+    NotSent,
+    /// The worker answered `Overloaded` instead of starting.
+    Refused,
+    /// Sent, then the call failed before the worker's `Started` frame.
+    LostBeforeStarted,
+    /// Sent, then the call failed after `Started`.
+    LostAfterStarted,
+}
+
 /// Where an attempt failed, for `may_retry`.
 ///
 /// Actions count as started once the RunRequest was sent: the isolate may
 /// run user code before the worker's `Started` frame arrives, so only a
 /// failed call or an explicit `Overloaded` (sent instead of starting) proves
 /// nothing ran.
-pub fn failure_stage(
-    udf_type: UdfType,
-    request_sent: bool,
-    overloaded: bool,
-    started: bool,
-) -> FailureStage {
-    if !request_sent || (overloaded && !started) {
-        return FailureStage::BeforeStart;
-    }
-    match udf_type {
-        UdfType::Query | UdfType::Mutation if started => FailureStage::AfterStart,
-        UdfType::Query | UdfType::Mutation => FailureStage::BeforeStart,
-        UdfType::Action | UdfType::HttpAction => FailureStage::AfterStart,
+pub fn failure_stage(udf_type: UdfType, delivery: Delivery) -> FailureStage {
+    match delivery {
+        Delivery::NotSent | Delivery::Refused => FailureStage::BeforeStart,
+        Delivery::LostAfterStarted => FailureStage::AfterStart,
+        Delivery::LostBeforeStarted => match udf_type {
+            UdfType::Query | UdfType::Mutation => FailureStage::BeforeStart,
+            UdfType::Action | UdfType::HttpAction => FailureStage::AfterStart,
+        },
     }
 }
 
@@ -122,7 +130,7 @@ mod tests {
             UdfType::HttpAction,
         ] {
             assert_eq!(
-                failure_stage(t, false, false, false),
+                failure_stage(t, Delivery::NotSent),
                 FailureStage::BeforeStart
             );
         }
@@ -137,7 +145,7 @@ mod tests {
             UdfType::HttpAction,
         ] {
             assert_eq!(
-                failure_stage(t, true, true, false),
+                failure_stage(t, Delivery::Refused),
                 FailureStage::BeforeStart
             );
         }
@@ -147,15 +155,13 @@ mod tests {
     fn actions_after_request_sent_are_after_start_even_without_started() {
         for t in [UdfType::Action, UdfType::HttpAction] {
             assert_eq!(
-                failure_stage(t, true, false, false),
+                failure_stage(t, Delivery::LostBeforeStarted),
                 FailureStage::AfterStart
             );
             assert_eq!(
-                failure_stage(t, true, false, true),
+                failure_stage(t, Delivery::LostAfterStarted),
                 FailureStage::AfterStart
             );
-            // Overloaded is only sent instead of starting.
-            assert_eq!(failure_stage(t, true, true, true), FailureStage::AfterStart);
         }
     }
 
@@ -163,11 +169,11 @@ mod tests {
     fn queries_and_mutations_follow_started() {
         for t in [UdfType::Query, UdfType::Mutation] {
             assert_eq!(
-                failure_stage(t, true, false, false),
+                failure_stage(t, Delivery::LostBeforeStarted),
                 FailureStage::BeforeStart
             );
             assert_eq!(
-                failure_stage(t, true, false, true),
+                failure_stage(t, Delivery::LostAfterStarted),
                 FailureStage::AfterStart
             );
         }
