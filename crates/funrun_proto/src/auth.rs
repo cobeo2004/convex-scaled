@@ -98,6 +98,12 @@ mod tests {
             .with_ansi(false)
             .finish();
         tracing::subscriber::with_default(subscriber, || {
+            // Other tests in this binary can hit the `warn!` callsite in
+            // `check_bearer` before any subscriber is installed, which caches
+            // its Interest as "never" for the process. Rebuild the cache
+            // against our scoped subscriber so the event isn't dropped
+            // regardless of test execution order.
+            tracing::callsite::rebuild_interest_cache();
             check_bearer(&MetadataMap::new(), &funrun_token("secret")).unwrap_err();
         });
         let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
