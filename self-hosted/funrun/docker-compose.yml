@@ -1,0 +1,82 @@
+name: convex-funrun
+x-common-env: &common-env
+  INSTANCE_NAME: convex-self-hosted
+  INSTANCE_SECRET: ${INSTANCE_SECRET:?set INSTANCE_SECRET (openssl rand -hex 32)}
+  CONVEX_CLOUD_ORIGIN: http://127.0.0.1:3210
+  CONVEX_SITE_ORIGIN: http://127.0.0.1:3211
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: rustfsadmin
+  AWS_SECRET_ACCESS_KEY: rustfsadmin
+  S3_ENDPOINT_URL: http://rustfs:9000
+  AWS_S3_FORCE_PATH_STYLE: "true"
+  S3_STORAGE_EXPORTS_BUCKET: convex-exports
+  S3_STORAGE_SNAPSHOT_IMPORTS_BUCKET: convex-imports
+  S3_STORAGE_MODULES_BUCKET: convex-modules
+  S3_STORAGE_FILES_BUCKET: convex-files
+  S3_STORAGE_SEARCH_BUCKET: convex-search
+  # RustFS rejects multipart uploads without a KMS/SSE-S3 key configured;
+  # disable server-side encryption to match a bare RustFS instance (see
+  # README.md "RustFS storage round trip").
+  AWS_S3_DISABLE_SSE: "true"
+
+services:
+  postgres:
+    image: postgres:17
+    environment: { POSTGRES_PASSWORD: convex, POSTGRES_DB: convex_self_hosted }
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "postgres"], interval: 2s, retries: 30 }
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment: { RUSTFS_ACCESS_KEY: rustfsadmin, RUSTFS_SECRET_KEY: rustfsadmin }
+    command: ["/data"]
+
+  buckets:
+    image: amazon/aws-cli
+    depends_on: [rustfs]
+    environment: { AWS_ACCESS_KEY_ID: rustfsadmin, AWS_SECRET_ACCESS_KEY: rustfsadmin, AWS_REGION: us-east-1 }
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "for b in convex-exports convex-imports convex-modules convex-files convex-search;
+       do aws --endpoint-url http://rustfs:9000 s3 mb s3://$$b || true; done"
+
+  conductor:
+    build: { context: ../.., dockerfile: self-hosted/funrun/Dockerfile }
+    # run_backend.sh derives --instance-name/--instance-secret/--s3-storage/the
+    # postgres DB_SPEC+DB_FLAGS from env (INSTANCE_NAME, INSTANCE_SECRET,
+    # POSTGRES_URL, the S3_* vars) -- LocalConfig's clap does not read those
+    # fields from the environment directly, only the new FUNCTION_RUNNER /
+    # FUNRUN_WORKERS / FUNRUN_ROUTING / FUNCTION_HOST_LISTEN flags do. See
+    # README.md "Deviations from the brief".
+    command: ["./run_backend.sh"]
+    env_file: [knobs.env]
+    environment:
+      <<: *common-env
+      POSTGRES_URL: postgres://postgres:convex@postgres:5432
+      DO_NOT_REQUIRE_SSL: "1"
+      FUNCTION_RUNNER: ${FUNCTION_RUNNER:-remote}
+      FUNRUN_WORKERS: ${FUNRUN_WORKERS:-worker:7400}
+      FUNRUN_ROUTING: ${FUNRUN_ROUTING:-direct}
+      FUNCTION_HOST_LISTEN: 0.0.0.0:7401
+    ports: ["3210:3210", "3211:3211"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      buckets: { condition: service_completed_successfully }
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:3210/version"], interval: 5s, start_period: 10s }
+    deploy: { resources: { limits: { cpus: "${CONDUCTOR_CPUS:-4}" } } }
+
+  worker:
+    build: { context: ../.., dockerfile: self-hosted/funrun/Dockerfile }
+    command: ["./funrun_worker"]
+    env_file: [knobs.env]
+    environment:
+      <<: *common-env
+      FUNCTION_HOST_URL: http://conductor:7401
+      FUNRUN_LISTEN: 0.0.0.0:7400
+    depends_on: [conductor]
+    deploy: { resources: { limits: { cpus: "${WORKER_CPUS:-4}" } } }
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    profiles: ["proxy"]
+    volumes: ["./envoy.yaml:/etc/envoy/envoy.yaml:ro"]
+    depends_on: [worker]

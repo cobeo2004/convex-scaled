@@ -1,0 +1,51 @@
+static_resources:
+  listeners:
+    - name: funrun_ingress
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 7400 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: funrun
+                codec_type: HTTP2
+                http2_protocol_options: {}
+                route_config:
+                  name: funrun_route
+                  virtual_hosts:
+                    - name: workers
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: workers
+                            timeout: 2100s
+                            hash_policy:
+                              - header:
+                                  header_name: x-convex-module
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: workers
+      type: STRICT_DNS
+      lb_policy: RING_HASH
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: workers
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: worker, port_value: 7400 }
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
