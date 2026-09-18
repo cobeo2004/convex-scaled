@@ -4158,6 +4158,8 @@ dependencies = [
  "search",
  "serde_json",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
  "udf",
  "usage_tracking",
  "value",

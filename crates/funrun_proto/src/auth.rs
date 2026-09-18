@@ -19,7 +19,15 @@ pub fn funrun_token(instance_secret: &str) -> String {
     base64::encode(hmac::sign(&key, b"funrun").as_ref())
 }
 
+/// Logs rejections: otherwise a peer with the wrong INSTANCE_SECRET fails
+/// silently on the rejecting side.
 pub fn check_bearer(metadata: &MetadataMap, expected: &str) -> Result<(), Status> {
+    verify_bearer(metadata, expected).inspect_err(|status| {
+        tracing::warn!("Unauthenticated funrun call rejected: {}", status.message())
+    })
+}
+
+fn verify_bearer(metadata: &MetadataMap, expected: &str) -> Result<(), Status> {
     let presented = metadata
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -46,6 +54,11 @@ impl Interceptor for BearerInterceptor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        Mutex,
+    };
+
     use tonic::metadata::MetadataMap;
 
     use super::*;
@@ -74,6 +87,36 @@ mod tests {
         );
         md.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         check_bearer(&md, &token).unwrap();
+    }
+
+    #[test]
+    fn rejected_bearer_is_logged() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || LogWriter(writer.clone()))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            check_bearer(&MetadataMap::new(), &funrun_token("secret")).unwrap_err();
+        });
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("Unauthenticated"), "{logs}");
+        assert!(logs.contains("missing funrun bearer token"), "{logs}");
+    }
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
