@@ -55,10 +55,10 @@ where
     F: FnOnce(SocketAddr, FunrunService) -> Fut,
     Fut: Future<Output = ()>,
 {
-    with_kind_worker(WorkerKind::Isolate, test)
+    with_kind_worker(WorkerKind::Isolate, 4, test)
 }
 
-fn with_kind_worker<F, Fut>(kind: WorkerKind, test: F)
+fn with_kind_worker<F, Fut>(kind: WorkerKind, capacity: usize, test: F)
 where
     F: FnOnce(SocketAddr, FunrunService) -> Fut,
     Fut: Future<Output = ()>,
@@ -67,7 +67,8 @@ where
     let rt = ProdRuntime::new(&tokio);
     rt.clone().block_on("test", async move {
         let host = connect_host("http://127.0.0.1:9", host_token(SECRET)).unwrap();
-        let service = FunrunService::new(rt, host, "carnitas", SECRET, None, kind, 4).unwrap();
+        let service =
+            FunrunService::new(rt, host, "carnitas", SECRET, None, kind, capacity, None).unwrap();
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = socket.local_addr().unwrap();
@@ -254,7 +255,7 @@ fn isolate_worker_rejects_node_request() {
 
 #[test]
 fn node_worker_rejects_deploy_request() {
-    with_kind_worker(WorkerKind::Node, |addr, _| async move {
+    with_kind_worker(WorkerKind::Node, 4, |addr, _| async move {
         let mut client = authed_client(addr).await;
         let mut down = client
             .execute(tokio_stream::iter(vec![auth_config_frame()]))
@@ -263,6 +264,47 @@ fn node_worker_rejects_deploy_request() {
             .into_inner();
         let err = down.message().await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    });
+}
+
+fn node_frame(json: &[u8]) -> ExecuteUp {
+    ExecuteUp {
+        inner: Some(execute_up::Inner::Node(NodeRequest {
+            executor_request_json: json.to_vec(),
+        })),
+    }
+}
+
+/// Admission comes before the executor is touched, so no executor is needed:
+/// a worker with no free slot answers `Overloaded`.
+#[test]
+fn node_worker_refuses_beyond_capacity() {
+    with_kind_worker(WorkerKind::Node, 0, |addr, _| async move {
+        let mut client = authed_client(addr).await;
+        let mut down = client
+            .execute(tokio_stream::iter(vec![node_frame(b"{}")]))
+            .await
+            .unwrap()
+            .into_inner();
+        let first = down.message().await.unwrap().and_then(|f| f.inner);
+        assert!(
+            matches!(first, Some(execute_down::Inner::Overloaded(_))),
+            "{first:?}"
+        );
+    });
+}
+
+#[test]
+fn node_request_with_bad_json_is_invalid_argument() {
+    with_kind_worker(WorkerKind::Node, 4, |addr, _| async move {
+        let mut client = authed_client(addr).await;
+        let mut down = client
+            .execute(tokio_stream::iter(vec![node_frame(b"not json")]))
+            .await
+            .unwrap()
+            .into_inner();
+        let err = down.message().await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     });
 }
 

@@ -29,6 +29,7 @@ isolate = { workspace = true }
 keybroker = { workspace = true }
 metrics = { workspace = true }
 model = { workspace = true }
+node_executor = { workspace = true }
 pb = { workspace = true }
 pb_funrun = { workspace = true }
 performance_stats = { workspace = true }

@@ -4190,6 +4190,7 @@ dependencies = [
  "keybroker",
  "metrics",
  "model",
+ "node_executor",
  "pb",
  "pb_funrun",
  "performance_stats",

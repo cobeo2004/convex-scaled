@@ -1,7 +1,10 @@
 //! Stateless remote function runner worker. It has no database: reads and
 //! action callbacks go back to the conductor's `function_host` over gRPC.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -10,6 +13,7 @@ use common::{
     knobs::{
         BACKEND_REQUEST_DRAIN_TIMEOUT,
         MAX_ISOLATE_WORKERS,
+        NODE_ACTION_USER_TIMEOUT,
     },
     runtime::{
         tokio_spawn,
@@ -22,6 +26,10 @@ use function_runner::server::{
     StorageForDeployment,
 };
 use funrun_proto::auth::host_token;
+use node_executor::{
+    local::LocalNodeExecutor,
+    NodeExecutor,
+};
 use runtime::prod::ProdRuntime;
 use storage::{
     Storage,
@@ -115,12 +123,23 @@ impl<RT: Runtime> StorageForDeployment<RT> for WorkerStorage {
 }
 
 /// Serves `Funrun` until SIGTERM/ctrl-c, then stops accepting and waits up to
-/// `BACKEND_REQUEST_DRAIN_TIMEOUT` for in-flight runs to send their results.
+/// the kind's drain timeout for in-flight runs to send their results.
 pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result<()> {
     let host = connect_host(
         &config.function_host_url,
         host_token(&config.instance_secret),
     )?;
+    let node = match config.kind {
+        WorkerKind::Isolate => None,
+        WorkerKind::Node => {
+            // Same timeout as `local_backend`'s in-process executor.
+            let node = Arc::new(
+                LocalNodeExecutor::new(*NODE_ACTION_USER_TIMEOUT + Duration::from_secs(5)).await?,
+            );
+            node.enable()?;
+            Some(node)
+        },
+    };
     let service = FunrunService::new(
         rt,
         host,
@@ -132,6 +151,7 @@ pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result
             WorkerKind::Isolate => *MAX_ISOLATE_WORKERS,
             WorkerKind::Node => config.node_max_concurrent,
         },
+        node.clone(),
     )?;
     let mut sigterm = signal(SignalKind::terminate())?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -158,12 +178,24 @@ pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result
     service.start_draining();
     let _ = shutdown_tx.send(());
     // The server finishes once every Execute stream has sent its last frame.
-    match tokio::time::timeout(*BACKEND_REQUEST_DRAIN_TIMEOUT, &mut server).await {
+    // A Node action may run for `NODE_ACTION_USER_TIMEOUT`, far past the
+    // isolate drain.
+    let drain = match config.kind {
+        WorkerKind::Isolate => *BACKEND_REQUEST_DRAIN_TIMEOUT,
+        WorkerKind::Node => config
+            .node_drain_timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(*NODE_ACTION_USER_TIMEOUT + Duration::from_secs(30)),
+    };
+    match tokio::time::timeout(drain, &mut server).await {
         Ok(result) => result??,
         Err(_) => tracing::warn!(
             "Drain timed out with {} functions still in flight",
             service.in_flight()
         ),
+    }
+    if let Some(node) = &node {
+        node.shutdown();
     }
     service.shutdown().await
 }

@@ -252,17 +252,13 @@ impl LocalNodeExecutor {
             }
         }
     }
-}
 
-#[async_trait]
-impl NodeExecutor for LocalNodeExecutor {
-    fn enable(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn invoke(
+    /// Same as [`NodeExecutor::invoke`], but takes the already-serialized
+    /// request JSON. Used by funrun Node workers, which receive the request
+    /// from the conductor pre-serialized.
+    pub async fn invoke_json(
         &self,
-        request: ExecutorRequest,
+        request_json: JsonValue,
         log_line_sender: mpsc::UnboundedSender<LogLine>,
     ) -> anyhow::Result<InvokeResponse> {
         let client = {
@@ -277,7 +273,6 @@ impl NodeExecutor for LocalNodeExecutor {
             let inner = inner.as_ref().unwrap();
             inner.client.clone()
         };
-        let request_json = JsonValue::try_from(request)?;
 
         let response_result = client
             .post("http://localhost/invoke".to_string())
@@ -337,6 +332,22 @@ impl NodeExecutor for LocalNodeExecutor {
             },
             Err(e) => Ok(e),
         }
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for LocalNodeExecutor {
+    fn enable(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn invoke(
+        &self,
+        request: ExecutorRequest,
+        log_line_sender: mpsc::UnboundedSender<LogLine>,
+    ) -> anyhow::Result<InvokeResponse> {
+        self.invoke_json(JsonValue::try_from(request)?, log_line_sender)
+            .await
     }
 
     fn shutdown(&self) {}

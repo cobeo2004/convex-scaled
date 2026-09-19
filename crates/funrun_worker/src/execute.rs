@@ -65,6 +65,7 @@ use keybroker::{
     FunctionRunnerKeyBroker,
     KeyBroker,
 };
+use node_executor::local::LocalNodeExecutor;
 use pb::error_metadata::ErrorMetadataStatusExt;
 use pb_funrun::funrun::{
     deploy_result,
@@ -80,11 +81,14 @@ use pb_funrun::funrun::{
     ExecuteDown,
     ExecuteUp,
     LoadReport,
+    NodeRequest,
+    NodeResult,
     Overloaded,
     Started,
     WatchLoadRequest,
 };
 use runtime::prod::ProdRuntime;
+use serde_json::Value as JsonValue;
 use tokio::sync::{
     mpsc,
     oneshot,
@@ -142,6 +146,8 @@ pub struct FunrunService {
     capacity: usize,
     in_flight: Arc<AtomicUsize>,
     draining: Arc<watch::Sender<bool>>,
+    /// `Some` exactly on Node workers.
+    node: Option<Arc<LocalNodeExecutor>>,
 }
 
 impl FunrunService {
@@ -154,6 +160,7 @@ impl FunrunService {
         convex_http_proxy: Option<url::Url>,
         kind: WorkerKind,
         capacity: usize,
+        node: Option<Arc<LocalNodeExecutor>>,
     ) -> anyhow::Result<Self> {
         let key_broker =
             KeyBroker::new(instance_name, DeploymentSecret::try_from(instance_secret)?)?
@@ -192,6 +199,7 @@ impl FunrunService {
             capacity,
             in_flight: Arc::new(AtomicUsize::new(0)),
             draining: Arc::new(watch::Sender::new(false)),
+            node,
         })
     }
 
@@ -242,10 +250,7 @@ impl FunrunService {
         match (self.kind, first) {
             (WorkerKind::Isolate, Up::Request(request)) => self.run_request(request, up, tx).await,
             (WorkerKind::Isolate, Up::Deploy(request)) => self.deploy(request, tx).await,
-            // Task 5 replaces this arm with the Node handler.
-            (WorkerKind::Node, Up::Node(_)) => Err(Status::unimplemented(
-                "node workers are not implemented yet",
-            )),
+            (WorkerKind::Node, Up::Node(request)) => self.node(request, tx).await,
             (kind @ WorkerKind::Isolate, other @ Up::Node(_))
             | (kind @ WorkerKind::Node, other @ (Up::Request(_) | Up::Deploy(_))) => {
                 Err(Status::failed_precondition(format!(
@@ -367,6 +372,41 @@ impl FunrunService {
             Down::DeployResult(DeployResult {
                 result: Some(result),
             }),
+        )
+        .await
+    }
+
+    /// A `"use node"` action on the local Node executor: `Started`, its log
+    /// lines, then `NodeResult`.
+    async fn node(&self, request: NodeRequest, tx: &DownSender) -> Result<(), Status> {
+        let Some(_in_flight) = self.try_acquire() else {
+            return self.overloaded(tx).await;
+        };
+        let json: JsonValue = serde_json::from_slice(&request.executor_request_json)
+            .map_err(|e| Status::invalid_argument(format!("invalid NodeRequest: {e}")))?;
+        let node = self
+            .node
+            .as_ref()
+            .ok_or_else(|| Status::internal("node executor missing"))?;
+        let (log_tx, log_rx) = mpsc::unbounded_channel();
+        // ponytail: reuse `drive` for ordering and cancellation. The executor
+        // has no "started" signal, so Started is pre-fired and goes first.
+        let (started_tx, started_rx) = oneshot::channel();
+        let _ = started_tx.send(());
+        let (_resp_tx, resp_rx) = mpsc::unbounded_channel();
+        drive(
+            node.invoke_json(json, log_tx),
+            started_rx,
+            log_rx,
+            resp_rx,
+            tx,
+            |resp| {
+                Ok(Down::NodeResult(NodeResult {
+                    response_json: serde_json::to_vec(&resp.response)
+                        .map_err(|e| Status::internal(e.to_string()))?,
+                    aws_request_id: resp.aws_request_id,
+                }))
+            },
         )
         .await
     }
