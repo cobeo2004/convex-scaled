@@ -12,11 +12,23 @@ use tonic::{
 pub const AUTHORIZATION: &str = "authorization";
 pub const MODULE_HEADER: &str = "x-convex-module";
 
-/// base64(HMAC-SHA256(INSTANCE_SECRET, "funrun")). Shared by conductor and
-/// workers; derived so no extra secret has to be distributed.
-pub fn funrun_token(instance_secret: &str) -> String {
+/// Bearer token for conductor -> worker calls (`Execute`, `WatchLoad`).
+pub fn worker_token(instance_secret: &str) -> String {
+    derive_token(instance_secret, b"funrun-worker")
+}
+
+/// Bearer token for worker -> conductor `FunctionHost` calls. Distinct from
+/// `worker_token`, so whatever answers a worker address (DNS says so) cannot
+/// replay the conductor's token against the `FunctionHost`.
+pub fn host_token(instance_secret: &str) -> String {
+    derive_token(instance_secret, b"funrun-host")
+}
+
+/// base64(HMAC-SHA256(INSTANCE_SECRET, label)), derived so no extra secret
+/// has to be distributed.
+fn derive_token(instance_secret: &str, label: &[u8]) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, instance_secret.as_bytes());
-    base64::encode(hmac::sign(&key, b"funrun").as_ref())
+    base64::encode(hmac::sign(&key, label).as_ref())
 }
 
 /// Logs rejections: otherwise a peer with the wrong INSTANCE_SECRET fails
@@ -64,14 +76,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_is_deterministic_and_secret_dependent() {
-        assert_eq!(funrun_token("a"), funrun_token("a"));
-        assert_ne!(funrun_token("a"), funrun_token("b"));
+    fn tokens_are_deterministic_and_secret_dependent() {
+        assert_eq!(worker_token("a"), worker_token("a"));
+        assert_ne!(worker_token("a"), worker_token("b"));
+        assert_eq!(host_token("a"), host_token("a"));
+        assert_ne!(host_token("a"), host_token("b"));
+    }
+
+    #[test]
+    fn a_token_for_one_direction_is_rejected_in_the_other() {
+        let mut md = MetadataMap::new();
+        md.insert(
+            AUTHORIZATION,
+            format!("Bearer {}", worker_token("s")).parse().unwrap(),
+        );
+        // `verify_bearer`: no log line to race `rejected_bearer_is_logged`.
+        verify_bearer(&md, &worker_token("s")).unwrap();
+        assert_eq!(
+            verify_bearer(&md, &host_token("s")).unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
     }
 
     #[test]
     fn check_bearer_accepts_matching_and_rejects_others() {
-        let token = funrun_token("secret");
+        let token = worker_token("secret");
         let mut md = MetadataMap::new();
         assert_eq!(
             check_bearer(&md, &token).unwrap_err().code(),
@@ -79,7 +108,7 @@ mod tests {
         );
         md.insert(
             AUTHORIZATION,
-            format!("Bearer {}", funrun_token("other")).parse().unwrap(),
+            format!("Bearer {}", worker_token("other")).parse().unwrap(),
         );
         assert_eq!(
             check_bearer(&md, &token).unwrap_err().code(),
@@ -104,7 +133,7 @@ mod tests {
             // against our scoped subscriber so the event isn't dropped
             // regardless of test execution order.
             tracing::callsite::rebuild_interest_cache();
-            check_bearer(&MetadataMap::new(), &funrun_token("secret")).unwrap_err();
+            check_bearer(&MetadataMap::new(), &worker_token("secret")).unwrap_err();
         });
         let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         assert!(logs.contains("WARN"), "{logs}");
@@ -128,10 +157,10 @@ mod tests {
     #[test]
     fn interceptor_adds_header() {
         let mut interceptor = BearerInterceptor {
-            token: funrun_token("s"),
+            token: worker_token("s"),
         };
         let req =
             tonic::service::Interceptor::call(&mut interceptor, tonic::Request::new(())).unwrap();
-        check_bearer(req.metadata(), &funrun_token("s")).unwrap();
+        check_bearer(req.metadata(), &worker_token("s")).unwrap();
     }
 }

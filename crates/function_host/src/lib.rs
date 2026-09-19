@@ -332,7 +332,8 @@ mod tests {
     };
     use funrun_proto::{
         auth::{
-            funrun_token,
+            host_token,
+            worker_token,
             BearerInterceptor,
         },
         callbacks::{
@@ -565,7 +566,7 @@ mod tests {
             index_reader_at,
             text_snapshot_at,
             index_at,
-            funrun_token("secret"),
+            host_token("secret"),
         ));
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -665,7 +666,18 @@ mod tests {
     #[tokio::test]
     async fn wrong_token_is_unauthenticated() {
         let t = start_host().await;
-        let mut client = connect(t.addr, &funrun_token("wrong")).await;
+        let mut client = connect(t.addr, &host_token("wrong")).await;
+        let err = client
+            .index_page(sample_index_page_request())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn conductor_to_worker_token_is_unauthenticated() {
+        let t = start_host().await;
+        let mut client = connect(t.addr, &worker_token("secret")).await;
         let err = client
             .index_page(sample_index_page_request())
             .await

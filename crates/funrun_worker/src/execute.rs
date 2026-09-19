@@ -166,7 +166,7 @@ impl FunrunService {
             key_broker,
             fetch_client,
             instance_name: instance_name.to_string(),
-            token: funrun_proto::auth::funrun_token(instance_secret),
+            token: funrun_proto::auth::worker_token(instance_secret),
             in_flight: Arc::new(AtomicUsize::new(0)),
         })
     }

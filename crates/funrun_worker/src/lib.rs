@@ -21,7 +21,7 @@ use function_runner::server::{
     DeploymentStorage,
     StorageForDeployment,
 };
-use funrun_proto::auth::funrun_token;
+use funrun_proto::auth::host_token;
 use runtime::prod::ProdRuntime;
 use storage::{
     Storage,
@@ -116,7 +116,7 @@ impl<RT: Runtime> StorageForDeployment<RT> for WorkerStorage {
 pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result<()> {
     let host = connect_host(
         &config.function_host_url,
-        funrun_token(&config.instance_secret),
+        host_token(&config.instance_secret),
     )?;
     let service = FunrunService::new(
         rt,

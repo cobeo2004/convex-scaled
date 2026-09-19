@@ -50,7 +50,7 @@ use function_host::{
     TextSnapshotAt,
 };
 use funrun_proto::{
-    auth::funrun_token,
+    auth::host_token,
     ids::repeatable_ts_from_u64,
 };
 use indexing::index_reader::{
@@ -315,7 +315,7 @@ pub async fn start_host_with_index_page_max_bytes(index_page_max_bytes: Option<u
         Arc::new(|ts| Ok(Arc::new(FakeIndexReader(ts)) as Arc<dyn IndexReader>));
     let text_snapshot_at: TextSnapshotAt = Arc::new(|_| anyhow::bail!("unused"));
     let index_at: IndexAt = Arc::new(|_, _| anyhow::bail!("unused"));
-    let token = funrun_token("secret");
+    let token = host_token("secret");
     let mut host = FunctionHost::new(index_reader_at, text_snapshot_at, index_at, token.clone());
     if let Some(bytes) = index_page_max_bytes {
         host = host.with_index_page_max_bytes(bytes);

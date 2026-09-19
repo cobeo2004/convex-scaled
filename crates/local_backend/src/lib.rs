@@ -75,7 +75,10 @@ use function_runner::{
     server::DeploymentStorage,
     FunctionRunner,
 };
-use funrun_proto::auth::funrun_token;
+use funrun_proto::auth::{
+    host_token,
+    worker_token,
+};
 use governor::Quota;
 use http_client::CachedHttpClient;
 use indexing::{
@@ -274,12 +277,10 @@ pub async fn make_app(
         fetch_client.clone(),
     )?;
     // `key_broker()` above already required the secret.
-    let funrun_token = funrun_token(
-        config
-            .instance_secret
-            .as_deref()
-            .context("--instance-secret is required")?,
-    );
+    let instance_secret = config
+        .instance_secret
+        .as_deref()
+        .context("--instance-secret is required")?;
     let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> = match config.function_runner {
         FunctionRunnerMode::Local => Arc::new(local_runner),
         FunctionRunnerMode::Remote => {
@@ -293,7 +294,7 @@ pub async fn make_app(
                     .clone()
                     .context("FUNRUN_WORKERS is required")?,
                 config.funrun_routing,
-                funrun_token.clone(),
+                worker_token(instance_secret),
             )?;
             Arc::new(RemoteFunctionRunner::new(
                 pool,
@@ -355,7 +356,7 @@ pub async fn make_app(
             persistence_reader,
             &application,
             config.function_host_listen,
-            funrun_token,
+            host_token(instance_secret),
         )?;
     }
 

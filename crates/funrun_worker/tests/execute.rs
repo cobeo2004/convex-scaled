@@ -8,7 +8,8 @@ use std::{
 };
 
 use funrun_proto::auth::{
-    funrun_token,
+    host_token,
+    worker_token,
     BearerInterceptor,
 };
 use funrun_worker::{
@@ -43,7 +44,7 @@ where
     let tokio = ProdRuntime::init_tokio().unwrap();
     let rt = ProdRuntime::new(&tokio);
     rt.clone().block_on("test", async move {
-        let host = connect_host("http://127.0.0.1:9", funrun_token(SECRET)).unwrap();
+        let host = connect_host("http://127.0.0.1:9", host_token(SECRET)).unwrap();
         let service = FunrunService::new(rt, host, "carnitas", SECRET, None).unwrap();
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -71,7 +72,7 @@ async fn authed_client(
     FunrunClient::with_interceptor(
         channel,
         BearerInterceptor {
-            token: funrun_token(SECRET),
+            token: worker_token(SECRET),
         },
     )
 }
