@@ -1,11 +1,41 @@
 {
   "name": "funrun_bench",
   "scenarios": [
-    { "name": "RunFunction", "path": "bench:byAuthor", "fn_type": "query", "benchmark": 10 },
-    { "name": "RunFunction", "path": "messages:cpuQuery", "fn_type": "query", "benchmark": 10 },
-    { "name": "RunFunction", "path": "bench:send", "fn_type": "mutation", "benchmark": 8 },
-    { "name": "RunFunction", "path": "bench:increment", "fn_type": "mutation", "benchmark": 8 },
-    { "name": "RunHttpAction", "path": "echo", "method": "POST", "benchmark": 2 },
-    { "name": "RunFunction", "path": "bench:burnCpu50", "fn_type": "action", "benchmark": 2 }
+    {
+      "name": "RunFunction",
+      "path": "bench:byAuthor",
+      "fn_type": "query",
+      "benchmark": 10
+    },
+    {
+      "name": "RunFunction",
+      "path": "messages:cpuQuery",
+      "fn_type": "query",
+      "benchmark": 10
+    },
+    {
+      "name": "RunFunction",
+      "path": "bench:send",
+      "fn_type": "mutation",
+      "benchmark": 8
+    },
+    {
+      "name": "RunFunction",
+      "path": "bench:increment",
+      "fn_type": "mutation",
+      "benchmark": 8
+    },
+    {
+      "name": "RunHttpAction",
+      "path": "echo",
+      "method": "POST",
+      "benchmark": 2
+    },
+    {
+      "name": "RunFunction",
+      "path": "bench:burnCpu50",
+      "fn_type": "action",
+      "benchmark": 2
+    }
   ]
 }

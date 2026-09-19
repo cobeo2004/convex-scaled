@@ -13,14 +13,19 @@ export const byAuthor = query({
   handler: async (ctx, { cacheBreaker }) =>
     ctx.db
       .query("messages")
-      .withIndex("by_author", (q) => q.eq("author", `reader${(cacheBreaker ?? 0) % READERS}`))
+      .withIndex("by_author", (q) =>
+        q.eq("author", `reader${(cacheBreaker ?? 0) % READERS}`),
+      )
       .collect(),
 });
 
 export const send = mutation({
   args: {},
   handler: async (ctx) =>
-    ctx.db.insert("messages", { author: `writer${Math.floor(Math.random() * 100)}`, body: "bench" }),
+    ctx.db.insert("messages", {
+      author: `writer${Math.floor(Math.random() * 100)}`,
+      body: "bench",
+    }),
 });
 
 // Same body as messages:increment, over 100 counters to keep OCC conflicts rare.
@@ -28,7 +33,10 @@ export const increment = mutation({
   args: {},
   handler: async (ctx) => {
     const name = `counter${Math.floor(Math.random() * 100)}`;
-    const row = await ctx.db.query("counters").withIndex("by_name", (q) => q.eq("name", name)).unique();
+    const row = await ctx.db
+      .query("counters")
+      .withIndex("by_name", (q) => q.eq("name", name))
+      .unique();
     if (row) {
       await ctx.db.patch(row._id, { value: row.value + 1 });
       return row.value + 1;

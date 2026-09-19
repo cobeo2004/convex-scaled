@@ -2,8 +2,8 @@
 
 Conductor (`convex-local-backend`, `FUNCTION_RUNNER=remote`) + N stateless
 `funrun_worker`s + Postgres + RustFS (S3-compatible, replaces MinIO) + the
-Convex dashboard on http://127.0.0.1:6791 (log in with the admin key below) +
-an optional Envoy proxy for `FUNRUN_ROUTING=proxy`.
+Convex dashboard on http://127.0.0.1:6791 (log in with the admin key below) + an
+optional Envoy proxy for `FUNRUN_ROUTING=proxy`.
 
 ## Run it
 
@@ -32,16 +32,16 @@ volumes).
 ## knobs.env
 
 Pins the transaction/function/isolate limits (`TRANSACTION_MAX_*`,
-`FUNCTION_MAX_*`, `ISOLATE_MAX_USER_HEAP_SIZE`, `DATABASE_UDF_USER_TIMEOUT_SECONDS`,
-`V8_ACTION_USER_TIMEOUT_SECS`) to the upstream defaults in
-`crates/common/src/knobs.rs` on both the conductor and every worker, so the
-two sides can't silently drift apart. It's loaded via `env_file:` on both
-services; it doesn't tune anything.
+`FUNCTION_MAX_*`, `ISOLATE_MAX_USER_HEAP_SIZE`,
+`DATABASE_UDF_USER_TIMEOUT_SECONDS`, `V8_ACTION_USER_TIMEOUT_SECS`) to the
+upstream defaults in `crates/common/src/knobs.rs` on both the conductor and
+every worker, so the two sides can't silently drift apart. It's loaded via
+`env_file:` on both services; it doesn't tune anything.
 
 ## RustFS storage round trip
 
-If a deploy's `ctx.storage.store`/`ctx.storage.get` action fails against
-RustFS, try disabling S3 features one at a time in `x-common-env`:
+If a deploy's `ctx.storage.store`/`ctx.storage.get` action fails against RustFS,
+try disabling S3 features one at a time in `x-common-env`:
 `AWS_S3_DISABLE_SSE=true`, then `AWS_S3_DISABLE_CHECKSUMS=true`.
 
 ## Credentials
@@ -59,12 +59,12 @@ and are overridable env vars; **defaults are for local development only.**
 - The Dockerfile has no `ENTRYPOINT` because the same image serves both the
   conductor (`./run_backend.sh`) and worker (`./funrun_worker`) services, each
   supplying its own `command:`.
-- `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart
-  uploads without a KMS/SSE-S3 key configured.
+- `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart uploads
+  without a KMS/SSE-S3 key configured.
 
 ## E2E equivalence suite
 
 `e2e/run.sh [local|direct|proxy ...]` brings the stack up once per config
 (default: all three), deploys `e2e/convex/`, runs `e2e/tests/` with vitest,
-checks that remote configs created isolates only on workers, and tears the
-stack down (`-v`). Uses the existing images; `BUILD=1` rebuilds first.
+checks that remote configs created isolates only on workers, and tears the stack
+down (`-v`). Uses the existing images; `BUILD=1` rebuilds first.

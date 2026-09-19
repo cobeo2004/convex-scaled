@@ -12,33 +12,52 @@ const http = new ConvexHttpClient(URL);
 
 describe(`funrun equivalence (${process.env.FUNCTION_RUNNER ?? "unknown"})`, () => {
   test("mutation then indexed query", async () => {
-    await http.mutation(api.messages.send, { author: `a-${run}`, body: "hello" });
-    const rows = await http.query(api.messages.byAuthor, { author: `a-${run}` });
+    await http.mutation(api.messages.send, {
+      author: `a-${run}`,
+      body: "hello",
+    });
+    const rows = await http.query(api.messages.byAuthor, {
+      author: `a-${run}`,
+    });
     expect(rows.map((r) => r.body)).toEqual(["hello"]);
   });
 
   test("concurrent increments are serialized by OCC", async () => {
     const name = `c-${run}`;
-    await Promise.all(Array.from({ length: 25 }, () => http.mutation(api.messages.increment, { name })));
+    await Promise.all(
+      Array.from({ length: 25 }, () =>
+        http.mutation(api.messages.increment, { name }),
+      ),
+    );
     expect(await http.query(api.messages.getCounter, { name })).toBe(25);
   });
 
   test("user errors surface unchanged", async () => {
-    await expect(http.mutation(api.messages.throws, {})).rejects.toThrow(/boom/);
+    await expect(http.mutation(api.messages.throws, {})).rejects.toThrow(
+      /boom/,
+    );
   });
 
   test("action callbacks: runMutation, runQuery, scheduler, storage", async () => {
     const author = `act-${run}`;
     const res = await http.action(api.actions.roundTrip, { author });
     expect(res).toEqual({ count: 1, text: "hello funrun" });
-    await expect.poll(async () => (await http.query(api.messages.byAuthor, { author })).length, { timeout: 10_000 }).toBe(2);
+    await expect
+      .poll(
+        async () =>
+          (await http.query(api.messages.byAuthor, { author })).length,
+        { timeout: 10_000 },
+      )
+      .toBe(2);
   });
 
   test("subscription updates after a write", async () => {
     const client = new ConvexClient(URL);
     const author = `sub-${run}`;
     const seen: number[] = [];
-    const unsub = client.onUpdate(api.messages.byAuthor, { author }, (rows) => seen.push(rows.length));
+    const unsub = client.onUpdate(api.messages.byAuthor, { author }, (rows) =>
+      seen.push(rows.length),
+    );
     await expect.poll(() => seen.at(-1)).toBe(0);
     await http.mutation(api.messages.send, { author, body: "live" });
     await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toBe(1);
@@ -56,10 +75,13 @@ describe(`funrun equivalence (${process.env.FUNCTION_RUNNER ?? "unknown"})`, () 
     const pageSizes: number[] = [];
     const seen: string[] = [];
     for (;;) {
-      const page: PaginationResult<Doc<"messages">> = await http.query(api.messages.byAuthorPage, {
-        author,
-        paginationOpts: { numItems: 3, cursor },
-      });
+      const page: PaginationResult<Doc<"messages">> = await http.query(
+        api.messages.byAuthorPage,
+        {
+          author,
+          paginationOpts: { numItems: 3, cursor },
+        },
+      );
       pageSizes.push(page.page.length);
       seen.push(...page.page.map((r) => r.body));
       if (page.isDone) break;
@@ -78,8 +100,17 @@ describe(`funrun equivalence (${process.env.FUNCTION_RUNNER ?? "unknown"})`, () 
   });
 
   test("text search", async () => {
-    await http.mutation(api.messages.send, { author: `s-${run}`, body: `needle${run}` });
-    await expect.poll(async () => (await http.query(api.search.find, { term: `needle${run}` })).length, { timeout: 15_000 }).toBe(1);
+    await http.mutation(api.messages.send, {
+      author: `s-${run}`,
+      body: `needle${run}`,
+    });
+    await expect
+      .poll(
+        async () =>
+          (await http.query(api.search.find, { term: `needle${run}` })).length,
+        { timeout: 15_000 },
+      )
+      .toBe(1);
   });
 
   test("http action request body and status", async () => {

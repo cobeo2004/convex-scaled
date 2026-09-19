@@ -85,7 +85,9 @@ jobs:
         run: npm install -g pnpm@11.15.1
 
       - name: Unit tests for fork crates
-        run: cargo test -p pb_funrun -p funrun_proto -p function_host -p funrun_worker -p remote_function_runner
+        run:
+          cargo test -p pb_funrun -p funrun_proto -p function_host -p
+          funrun_worker -p remote_function_runner
 
       # BUILD=1 is required: a fresh runner has no pre-built conductor/worker
       # image for run.sh to reuse. This is a full release build of the

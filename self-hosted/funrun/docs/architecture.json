@@ -12,42 +12,24 @@
       "type": "external",
       "label": "Convex Clients",
       "sublabel": "SDK · HTTP actions",
-      "pos": [
-        40,
-        280
-      ],
-      "size": [
-        140,
-        62
-      ]
+      "pos": [40, 280],
+      "size": [140, 62]
     },
     {
       "id": "dashboard",
       "type": "frontend",
       "label": "Dashboard",
       "sublabel": ":6791",
-      "pos": [
-        40,
-        470
-      ],
-      "size": [
-        140,
-        62
-      ]
+      "pos": [40, 470],
+      "size": [140, 62]
     },
     {
       "id": "conductor",
       "type": "backend",
       "label": "Conductor",
       "sublabel": "sync · OCC · commits",
-      "pos": [
-        270,
-        280
-      ],
-      "size": [
-        150,
-        62
-      ],
+      "pos": [270, 280],
+      "size": [150, 62],
       "tag": ":3210 / :3211"
     },
     {
@@ -55,56 +37,32 @@
       "type": "backend",
       "label": "RemoteFunctionRunner",
       "sublabel": "pick · retry · timeout",
-      "pos": [
-        500,
-        160
-      ],
-      "size": [
-        180,
-        62
-      ]
+      "pos": [500, 160],
+      "size": [180, 62]
     },
     {
       "id": "host",
       "type": "backend",
       "label": "FunctionHost",
       "sublabel": "gRPC :7401",
-      "pos": [
-        500,
-        400
-      ],
-      "size": [
-        180,
-        62
-      ]
+      "pos": [500, 400],
+      "size": [180, 62]
     },
     {
       "id": "envoy",
       "type": "cloud",
       "label": "Envoy",
       "sublabel": "proxy mode only",
-      "pos": [
-        770,
-        40
-      ],
-      "size": [
-        140,
-        62
-      ]
+      "pos": [770, 40],
+      "size": [140, 62]
     },
     {
       "id": "workers",
       "type": "backend",
       "label": "funrun_worker × N",
       "sublabel": "V8 isolates · :7400",
-      "pos": [
-        1000,
-        280
-      ],
-      "size": [
-        180,
-        70
-      ],
+      "pos": [1000, 280],
+      "size": [180, 70],
       "tag": "stateless"
     },
     {
@@ -112,47 +70,29 @@
       "type": "database",
       "label": "Postgres",
       "sublabel": "documents · indexes",
-      "pos": [
-        270,
-        560
-      ],
-      "size": [
-        150,
-        62
-      ]
+      "pos": [270, 560],
+      "size": [150, 62]
     },
     {
       "id": "rustfs",
       "type": "database",
       "label": "RustFS (S3)",
       "sublabel": "modules · files",
-      "pos": [
-        1000,
-        560
-      ],
-      "size": [
-        180,
-        62
-      ]
+      "pos": [1000, 560],
+      "size": [180, 62]
     }
   ],
   "boundaries": [
     {
       "kind": "security-group",
       "label": "conductor process (upstream local_backend)",
-      "wraps": [
-        "conductor",
-        "runner",
-        "host"
-      ],
+      "wraps": ["conductor", "runner", "host"],
       "pad": 18
     },
     {
       "kind": "region",
       "label": "scale out",
-      "wraps": [
-        "workers"
-      ],
+      "wraps": ["workers"],
       "pad": 18
     }
   ],
@@ -200,19 +140,13 @@
       "from": "conductor",
       "to": "postgres",
       "label": "commit · read",
-      "labelAt": [
-        345,
-        455
-      ]
+      "labelAt": [345, 455]
     },
     {
       "from": "workers",
       "to": "rustfs",
       "label": "load modules",
-      "labelAt": [
-        1090,
-        455
-      ]
+      "labelAt": [1090, 455]
     }
   ],
   "cards": [

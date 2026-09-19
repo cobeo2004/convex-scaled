@@ -1,7 +1,8 @@
 name: convex-funrun
 x-common-env: &common-env
   INSTANCE_NAME: convex-self-hosted
-  INSTANCE_SECRET: ${INSTANCE_SECRET:?set INSTANCE_SECRET (openssl rand -hex 32)}
+  INSTANCE_SECRET:
+    ${INSTANCE_SECRET:?set INSTANCE_SECRET (openssl rand -hex 32)}
   CONVEX_CLOUD_ORIGIN: http://127.0.0.1:3210
   CONVEX_SITE_ORIGIN: http://127.0.0.1:3211
   AWS_REGION: us-east-1
@@ -24,7 +25,12 @@ services:
     image: postgres:17
     environment: { POSTGRES_PASSWORD: convex, POSTGRES_DB: convex_self_hosted }
     volumes: ["pgdata:/var/lib/postgresql/data"]
-    healthcheck: { test: ["CMD", "pg_isready", "-U", "postgres"], interval: 2s, retries: 30 }
+    healthcheck:
+      {
+        test: ["CMD", "pg_isready", "-U", "postgres"],
+        interval: 2s,
+        retries: 30,
+      }
 
   rustfs:
     # Pinned to the locally verified beta (`docker image inspect
@@ -32,21 +38,37 @@ services:
     # v1.0.0-beta.12) so the stack doesn't silently pick up a breaking
     # `:latest` change.
     image: rustfs/rustfs@sha256:41fe89380f4120a337790c02af192c3fe7bb55c3edc2e6e9357b487b47c6ab21
-    environment: { RUSTFS_ACCESS_KEY: "${RUSTFS_ACCESS_KEY:-rustfsadmin}", RUSTFS_SECRET_KEY: "${RUSTFS_SECRET_KEY:-rustfsadmin}" }
+    environment:
+      {
+        RUSTFS_ACCESS_KEY: "${RUSTFS_ACCESS_KEY:-rustfsadmin}",
+        RUSTFS_SECRET_KEY: "${RUSTFS_SECRET_KEY:-rustfsadmin}",
+      }
     command: ["/data"]
     volumes: ["rustfsdata:/data"]
-    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:9000/health"], interval: 2s, retries: 30 }
+    healthcheck:
+      {
+        test: ["CMD", "curl", "-f", "http://localhost:9000/health"],
+        interval: 2s,
+        retries: 30,
+      }
 
   buckets:
     image: amazon/aws-cli
     depends_on:
       rustfs: { condition: service_healthy }
-    environment: { AWS_ACCESS_KEY_ID: "${RUSTFS_ACCESS_KEY:-rustfsadmin}", AWS_SECRET_ACCESS_KEY: "${RUSTFS_SECRET_KEY:-rustfsadmin}", AWS_REGION: us-east-1 }
+    environment:
+      {
+        AWS_ACCESS_KEY_ID: "${RUSTFS_ACCESS_KEY:-rustfsadmin}",
+        AWS_SECRET_ACCESS_KEY: "${RUSTFS_SECRET_KEY:-rustfsadmin}",
+        AWS_REGION: us-east-1,
+      }
     entrypoint: ["/bin/sh", "-c"]
     command: >
       "set -e;
-       for b in convex-exports convex-imports convex-modules convex-files convex-search;
-       do aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket $$b 2>/dev/null ||
+       for b in convex-exports convex-imports convex-modules convex-files
+      convex-search;
+       do aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket $$b
+      2>/dev/null ||
           aws --endpoint-url http://rustfs:9000 s3 mb s3://$$b;
        done"
 
@@ -72,7 +94,12 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       buckets: { condition: service_completed_successfully }
-    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:3210/version"], interval: 5s, start_period: 10s }
+    healthcheck:
+      {
+        test: ["CMD", "curl", "-f", "http://localhost:3210/version"],
+        interval: 5s,
+        start_period: 10s,
+      }
     deploy: { resources: { limits: { cpus: "${CONDUCTOR_CPUS:-4}" } } }
 
   worker:
