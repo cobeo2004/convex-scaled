@@ -96,7 +96,13 @@ COPY .cargo/config.toml ./.cargo/config.toml
 COPY --from=chef /tmp/recipe.json recipe.json
 # Use cargo-chef to build dependencies from the recipe created in the first stage
 # This step will be cached unless dependencies change
-RUN --mount=type=cache,target=/convex/target/ --mount=type=cache,target=/usr/local/cargo/git/db --mount=type=cache,target=/usr/local/cargo/registry/ PROTOC="$(mise which protoc)" cargo chef cook --release --recipe-path recipe.json
+# rusty_v8's build script writes its bindings into its git checkout, which is
+# fresh in this layer whenever this step reruns, while the target cache still
+# calls v8 built: the compile then fails on the missing gen/ file. So drop
+# v8's cached build first (a v8 rebuild whenever dependencies change).
+RUN --mount=type=cache,target=/convex/target/ --mount=type=cache,target=/usr/local/cargo/git/db --mount=type=cache,target=/usr/local/cargo/registry/ \
+    rm -rf target/release/build/v8-* target/release/.fingerprint/v8-* \
+    && PROTOC="$(mise which protoc)" cargo chef cook --release --recipe-path recipe.json
 # Now copy everything else over -- we've minimized the set of files that cause a full `pnpm install` or `cargo build` to run.
 COPY . .
 
