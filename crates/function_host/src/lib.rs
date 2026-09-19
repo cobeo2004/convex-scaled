@@ -80,6 +80,9 @@ pub struct FunctionHost {
     /// Weak so the host never keeps `Application` alive.
     action_callbacks: RwLock<Option<Weak<dyn ActionCallbacks>>>,
     token: String,
+    /// IndexPage responses stop adding entries past this many bytes: a page
+    /// of large documents could otherwise exceed the gRPC message limit.
+    index_page_max_bytes: usize,
 }
 
 impl FunctionHost {
@@ -95,7 +98,13 @@ impl FunctionHost {
             index_at,
             action_callbacks: RwLock::new(None),
             token,
+            index_page_max_bytes: *MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE / 2,
         }
+    }
+
+    pub fn with_index_page_max_bytes(mut self, index_page_max_bytes: usize) -> Self {
+        self.index_page_max_bytes = index_page_max_bytes;
+        self
     }
 
     pub fn set_action_callbacks(&self, cb: Arc<dyn ActionCallbacks>) {
@@ -128,7 +137,7 @@ impl FunctionHost {
                 args.max_results,
             )
             .await?;
-        index_page_to_proto(&page)
+        index_page_to_proto(&page, self.index_page_max_bytes)
     }
 
     async fn text_search(&self, req: TextSearchRequest) -> anyhow::Result<TextSearchResponse> {

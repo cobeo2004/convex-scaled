@@ -30,6 +30,7 @@ use pb_funrun::funrun::{
     IndexPageRequest,
     IndexPageResponse,
 };
+use prost::Message;
 use value::TabletId;
 
 use crate::ids::{
@@ -99,19 +100,35 @@ pub fn index_page_request_from_proto(p: IndexPageRequest) -> anyhow::Result<Inde
     })
 }
 
-pub fn index_page_to_proto(page: &IndexPage) -> anyhow::Result<IndexPageResponse> {
+/// Encodes `page`, cut short after the last entry that keeps the entries
+/// within `max_bytes` (but never fewer than one entry), with the cursor after
+/// that entry. `RemoteIndexReader` requests the rest.
+pub fn index_page_to_proto(
+    page: &IndexPage,
+    max_bytes: usize,
+) -> anyhow::Result<IndexPageResponse> {
+    let mut entries: Vec<IndexEntryProto> = Vec::new();
+    let mut bytes = 0;
+    for e in &page.entries {
+        let entry = IndexEntryProto {
+            key: e.key.0.clone(),
+            ts: e.ts.into(),
+            value: Some(e.value.unpack().try_into()?),
+        };
+        bytes += entry.encoded_len();
+        if let Some(last) = entries.last()
+            && bytes > max_bytes
+        {
+            let cursor_after = Some(last.key.clone());
+            return Ok(IndexPageResponse {
+                entries,
+                cursor_after,
+            });
+        }
+        entries.push(entry);
+    }
     Ok(IndexPageResponse {
-        entries: page
-            .entries
-            .iter()
-            .map(|e| {
-                Ok(IndexEntryProto {
-                    key: e.key.0.clone(),
-                    ts: e.ts.into(),
-                    value: Some(e.value.unpack().try_into()?),
-                })
-            })
-            .collect::<anyhow::Result<_>>()?,
+        entries,
         cursor_after: match &page.cursor {
             CursorPosition::After(key) => Some(key.0.clone()),
             CursorPosition::End => None,
@@ -174,21 +191,56 @@ mod tests {
     };
 
     fn assert_page_round_trips(page: IndexPage) {
-        let proto = index_page_to_proto(&page).unwrap();
+        let proto = index_page_to_proto(&page, usize::MAX).unwrap();
         let back = index_page_from_proto(proto.clone()).unwrap();
-        assert_eq!(index_page_to_proto(&back).unwrap(), proto);
+        assert_eq!(index_page_to_proto(&back, usize::MAX).unwrap(), proto);
         assert_eq!(back, page);
+    }
+
+    fn entry(key: u8, ts: u64, body: &str) -> Arc<IndexEntry> {
+        Arc::new(IndexEntry {
+            key: IndexKeyBytes(vec![key]),
+            ts: Timestamp::try_from(ts).unwrap(),
+            value: sample_document("alice", body),
+        })
+    }
+
+    fn three_entries_page() -> IndexPage {
+        IndexPage {
+            entries: vec![
+                entry(1, 10, "one"),
+                entry(2, 20, "two"),
+                entry(3, 30, "three"),
+            ],
+            cursor: CursorPosition::End,
+        }
+    }
+
+    #[test]
+    fn index_page_over_the_byte_budget_is_cut_after_the_last_entry_that_fits() {
+        let page = three_entries_page();
+        let one = index_page_to_proto(&page, usize::MAX).unwrap().entries[0].encoded_len();
+        let proto = index_page_to_proto(&page, 2 * one + 1).unwrap();
+        assert_eq!(proto.entries.len(), 2);
+        assert_eq!(proto.cursor_after, Some(vec![2]));
+    }
+
+    #[test]
+    fn index_page_always_carries_at_least_one_entry() {
+        let proto = index_page_to_proto(&three_entries_page(), 1).unwrap();
+        assert_eq!(proto.entries.len(), 1);
+        assert_eq!(proto.cursor_after, Some(vec![1]));
+    }
+
+    #[test]
+    fn index_page_within_the_budget_keeps_its_cursor() {
+        let proto = index_page_to_proto(&three_entries_page(), usize::MAX).unwrap();
+        assert_eq!(proto.entries.len(), 3);
+        assert_eq!(proto.cursor_after, None);
     }
 
     #[test]
     fn index_page_with_entries_round_trips() {
-        let entry = |key: u8, ts: u64, body: &str| {
-            Arc::new(IndexEntry {
-                key: IndexKeyBytes(vec![key]),
-                ts: Timestamp::try_from(ts).unwrap(),
-                value: sample_document("alice", body),
-            })
-        };
         assert_page_round_trips(IndexPage {
             entries: vec![entry(1, 10, "one"), entry(2, 20, "two")],
             cursor: CursorPosition::After(IndexKeyBytes(vec![2])),

@@ -23,6 +23,7 @@ use common::{
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
     },
     query::{
+        CursorPosition,
         InternalSearch,
         Order,
         SearchVersion,
@@ -117,11 +118,8 @@ impl RemoteIndexReader {
     pub fn new(client: HostChannel, ts: RepeatableTimestamp) -> Self {
         Self { client, ts }
     }
-}
 
-#[async_trait]
-impl IndexReader for RemoteIndexReader {
-    async fn index_page(
+    async fn fetch_page(
         &self,
         index: IndexRef,
         tablet_id: TabletId,
@@ -139,6 +137,43 @@ impl IndexReader for RemoteIndexReader {
             .await
             .map_err(|s| s.into_anyhow())?;
         index_page_from_proto(resp.into_inner())
+    }
+}
+
+#[async_trait]
+impl IndexReader for RemoteIndexReader {
+    async fn index_page(
+        &self,
+        index: IndexRef,
+        tablet_id: TabletId,
+        interval: &Interval,
+        order: Order,
+        max_results: usize,
+    ) -> anyhow::Result<IndexPage> {
+        let mut page = self
+            .fetch_page(index, tablet_id, interval, order, max_results)
+            .await?;
+        // The conductor cuts pages at a byte budget, but callers such as
+        // `DatabaseIndexSnapshot::fetch_cache_misses` read a short page as
+        // the end of the interval, so fetch the rest here. Each response
+        // carries at least one entry, so this terminates.
+        while page.entries.len() < max_results
+            && let CursorPosition::After(_) = &page.cursor
+        {
+            let (_, rest) = interval.split(page.cursor.clone(), order);
+            let more = self
+                .fetch_page(
+                    index,
+                    tablet_id,
+                    &rest,
+                    order,
+                    max_results - page.entries.len(),
+                )
+                .await?;
+            page.entries.extend(more.entries);
+            page.cursor = more.cursor;
+        }
+        Ok(page)
     }
 
     fn timestamp(&self) -> RepeatableTimestamp {

@@ -19,6 +19,7 @@ keybroker = { workspace = true }
 model = { workspace = true }
 pb = { workspace = true }
 pb_funrun = { workspace = true }
+prost = { workspace = true }
 search = { workspace = true }
 serde_json = { workspace = true }
 sync_types = { workspace = true }

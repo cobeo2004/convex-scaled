@@ -124,6 +124,8 @@ pub fn sample_context() -> ExecutionContext {
     )
 }
 
+/// Three documents with index keys `[1]`, `[2]`, `[3]`, paged like
+/// `PersistenceSnapshot::index_page`.
 struct FakeIndexReader(RepeatableTimestamp);
 
 #[async_trait]
@@ -132,24 +134,37 @@ impl IndexReader for FakeIndexReader {
         &self,
         _index: IndexRef,
         tablet_id: TabletId,
-        _interval: &Interval,
-        _order: Order,
-        _max_results: usize,
+        interval: &Interval,
+        order: Order,
+        max_results: usize,
     ) -> anyhow::Result<IndexPage> {
-        let id = ResolvedDocumentId {
-            tablet_id,
-            developer_id: DeveloperDocumentId::new(
-                TableNumber::try_from(10001u32)?,
-                InternalId::from([7u8; 16]),
-            ),
-        };
-        let doc = ResolvedDocument::new(id, CreationTime::try_from(1.0)?, ConvexObject::empty())?;
-        Ok(IndexPage {
-            entries: vec![Arc::new(IndexEntry {
-                key: IndexKeyBytes(vec![1]),
+        let mut keys = vec![1u8, 2, 3];
+        if order == Order::Desc {
+            keys.reverse();
+        }
+        let mut entries = vec![];
+        for key in keys.into_iter().filter(|k| interval.contains(&[*k])) {
+            let id = ResolvedDocumentId {
+                tablet_id,
+                developer_id: DeveloperDocumentId::new(
+                    TableNumber::try_from(10001u32)?,
+                    InternalId::from([key; 16]),
+                ),
+            };
+            let doc =
+                ResolvedDocument::new(id, CreationTime::try_from(1.0)?, ConvexObject::empty())?;
+            entries.push(Arc::new(IndexEntry {
+                key: IndexKeyBytes(vec![key]),
                 ts: Timestamp::MIN,
                 value: PackedDocument::pack(&doc),
-            })],
+            }));
+            if entries.len() == max_results {
+                let cursor = CursorPosition::After(IndexKeyBytes(vec![key]));
+                return Ok(IndexPage { entries, cursor });
+            }
+        }
+        Ok(IndexPage {
+            entries,
             cursor: CursorPosition::End,
         })
     }
@@ -291,17 +306,21 @@ pub struct TestHost {
 
 /// Serves until the test's runtime shuts down.
 pub async fn start_host_with_fakes() -> TestHost {
+    start_host_with_index_page_max_bytes(None).await
+}
+
+/// `index_page_max_bytes` overrides the host's IndexPage byte budget.
+pub async fn start_host_with_index_page_max_bytes(index_page_max_bytes: Option<usize>) -> TestHost {
     let index_reader_at: IndexReaderAt =
         Arc::new(|ts| Ok(Arc::new(FakeIndexReader(ts)) as Arc<dyn IndexReader>));
     let text_snapshot_at: TextSnapshotAt = Arc::new(|_| anyhow::bail!("unused"));
     let index_at: IndexAt = Arc::new(|_, _| anyhow::bail!("unused"));
     let token = funrun_token("secret");
-    let host = Arc::new(FunctionHost::new(
-        index_reader_at,
-        text_snapshot_at,
-        index_at,
-        token.clone(),
-    ));
+    let mut host = FunctionHost::new(index_reader_at, text_snapshot_at, index_at, token.clone());
+    if let Some(bytes) = index_page_max_bytes {
+        host = host.with_index_page_max_bytes(bytes);
+    }
+    let host = Arc::new(host);
     let callbacks: Arc<dyn ActionCallbacks> = Arc::new(FakeCallbacks);
     host.set_action_callbacks(callbacks.clone());
     let socket = TcpSocket::new_v4().unwrap();
