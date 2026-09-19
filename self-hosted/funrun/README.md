@@ -59,6 +59,11 @@ and are overridable env vars; **defaults are for local development only.**
 - The Dockerfile has no `ENTRYPOINT` because the same image serves both the
   conductor (`./run_backend.sh`) and worker (`./funrun_worker`) services, each
   supplying its own `command:`.
+- Listeners default to `0.0.0.0` because containers without IPv6 (Docker
+  Desktop) can't bind `[::]`. On IPv6 private networks (Railway) set
+  `FUNRUN_LISTEN=[::]:7400` and `FUNCTION_HOST_LISTEN=[::]:7401`. When a
+  worker's DNS name returns both families, the conductor keeps only the first
+  address family the resolver returns, so each worker counts once.
 - `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart uploads
   without a KMS/SSE-S3 key configured.
 

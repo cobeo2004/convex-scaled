@@ -6,6 +6,7 @@ use std::{
         BTreeMap,
         BTreeSet,
     },
+    net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
@@ -153,7 +154,7 @@ impl WorkerPool {
         loop {
             match tokio::net::lookup_host(&target).await {
                 Ok(addrs) => {
-                    let addrs: BTreeSet<String> = addrs.map(|a| a.to_string()).collect();
+                    let addrs = one_family(addrs.collect());
                     self.sync_workers(&rt, &addrs, &token);
                 },
                 Err(e) => tracing::warn!("funrun worker lookup of {target} failed: {e}"),
@@ -308,6 +309,21 @@ pub(crate) fn connect_for_test(addr: &str) -> FunrunChannel {
     connect(addr, "test-token".to_string()).expect("valid address")
 }
 
+/// Dual-stack DNS returns an A and an AAAA record per worker; keeping both
+/// would count each worker twice. Keep the family of the first address, which
+/// the resolver orders by what this host can reach (RFC 6724).
+fn one_family(addrs: Vec<SocketAddr>) -> BTreeSet<String> {
+    let Some(first) = addrs.first() else {
+        return BTreeSet::new();
+    };
+    let ipv6 = first.is_ipv6();
+    addrs
+        .iter()
+        .filter(|a| a.is_ipv6() == ipv6)
+        .map(|a| a.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -318,10 +334,33 @@ mod tests {
 
     use super::{
         check_protocol_version,
+        one_family,
         reconnect_delay,
         MAX_RECONNECT_DELAY,
         RECONNECT_DELAY,
     };
+
+    #[test]
+    fn dual_stack_workers_are_counted_once() {
+        let addrs = |list: &[&str]| list.iter().map(|a| a.parse().unwrap()).collect();
+        let v6_first = one_family(addrs(&[
+            "[fd12::1]:7400",
+            "10.0.0.1:7400",
+            "[fd12::2]:7400",
+        ]));
+        assert_eq!(
+            v6_first,
+            ["[fd12::1]:7400", "[fd12::2]:7400"]
+                .map(String::from)
+                .into()
+        );
+        let v4_first = one_family(addrs(&["10.0.0.1:7400", "[fd12::1]:7400", "10.0.0.2:7400"]));
+        assert_eq!(
+            v4_first,
+            ["10.0.0.1:7400", "10.0.0.2:7400"].map(String::from).into()
+        );
+        assert!(one_family(vec![]).is_empty());
+    }
 
     #[test]
     fn rejected_watch_load_backs_off_up_to_the_cap() {
