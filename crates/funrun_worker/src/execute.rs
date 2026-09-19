@@ -24,13 +24,13 @@ use common::{
     },
     knobs::{
         FUNRUN_ISOLATE_ACTIVE_THREADS,
-        FUNRUN_SCHEDULER_MAX_PERCENT_PER_CLIENT,
         MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE,
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
         MAX_ISOLATE_WORKERS,
     },
     runtime::tokio_spawn,
 };
+use errors::ErrorMetadataAnyhowExt;
 use function_runner::server::{
     FunctionRunnerCore,
     HttpActionMetadata,
@@ -153,7 +153,9 @@ impl FunrunService {
         let core = FunctionRunnerCore::new(
             rt.clone(),
             storage.clone(),
-            *FUNRUN_SCHEDULER_MAX_PERCENT_PER_CLIENT,
+            // ponytail: one worker serves one deployment, which is the
+            // scheduler's only client, like `InProcessFunctionRunner`.
+            100,
             isolate_worker,
         )?;
         Ok(Self {
@@ -295,13 +297,29 @@ impl FunrunService {
                     while let Ok(part) = resp_rx.try_recv() {
                         send_down(tx, response_part_to_down(part)).await?;
                     }
-                    let (transaction, outcome, usage) = result.map_err(Status::from_anyhow)?;
+                    let (transaction, outcome, usage) = match result {
+                        Ok(run) => run,
+                        Err(e) => return send(tx, run_error_to_down(e)?).await,
+                    };
                     let result = run_result_to_proto(transaction, outcome, usage)
                         .map_err(Status::from_anyhow)?;
                     return send(tx, Down::Result(result)).await;
                 },
             }
         }
+    }
+}
+
+/// A run the isolate scheduler rejected before executing it (full queue,
+/// CoDel expiry, ...) did nothing, so it goes back as `Overloaded` and the
+/// conductor retries it elsewhere, whatever its `UdfType`.
+fn run_error_to_down(error: anyhow::Error) -> Result<Down, Status> {
+    if error.is_rejected_before_execution() {
+        Ok(Down::Overloaded(Overloaded {
+            reason: format!("{error:#}"),
+        }))
+    } else {
+        Err(Status::from_anyhow(error))
     }
 }
 
@@ -438,8 +456,15 @@ mod tests {
         Arc,
     };
 
+    use errors::ErrorMetadata;
+    use pb_funrun::funrun::{
+        execute_down::Inner as Down,
+        Overloaded,
+    };
+
     use super::{
         ensure_same_instance,
+        run_error_to_down,
         InFlightGuard,
     };
 
@@ -470,6 +495,24 @@ mod tests {
             status.message()
         );
         ensure_same_instance("carnitas", "carnitas").unwrap();
+    }
+
+    #[test]
+    fn rejected_before_execution_is_sent_as_overloaded() {
+        let error = anyhow::anyhow!("queue").context(ErrorMetadata::rejected_before_execution(
+            "ExpiredInQueue",
+            "too long in queue",
+        ));
+        let Ok(Down::Overloaded(Overloaded { reason })) = run_error_to_down(error) else {
+            panic!("expected Overloaded");
+        };
+        assert!(reason.contains("too long in queue"), "{reason}");
+    }
+
+    #[test]
+    fn other_run_errors_stay_errors() {
+        let error = anyhow::anyhow!(ErrorMetadata::bad_request("Bad", "nope"));
+        assert!(run_error_to_down(error).is_err());
     }
 
     #[test]

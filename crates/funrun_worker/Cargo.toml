@@ -20,6 +20,7 @@ clap = { workspace = true }
 cmd_util = { workspace = true }
 common = { workspace = true }
 database = { workspace = true }
+errors = { workspace = true }
 function_runner = { workspace = true }
 funrun_proto = { workspace = true }
 futures = { workspace = true }
@@ -48,7 +49,6 @@ value = { workspace = true }
 vector = { workspace = true }
 
 [dev-dependencies]
-errors = { workspace = true }
 function_host = { workspace = true }
 
 [lints]
