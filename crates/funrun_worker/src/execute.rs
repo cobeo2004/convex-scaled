@@ -120,6 +120,7 @@ pub struct FunrunService {
     host: HostChannel,
     key_broker: FunctionRunnerKeyBroker,
     fetch_client: Arc<dyn FetchClient>,
+    instance_name: String,
     token: String,
     in_flight: Arc<AtomicUsize>,
 }
@@ -162,6 +163,7 @@ impl FunrunService {
             host,
             key_broker,
             fetch_client,
+            instance_name: instance_name.to_string(),
             token: funrun_proto::auth::funrun_token(instance_secret),
             in_flight: Arc::new(AtomicUsize::new(0)),
         })
@@ -215,6 +217,7 @@ impl FunrunService {
         };
         let parts = run_request_from_proto(request)
             .map_err(|e| Status::invalid_argument(format!("invalid RunRequest: {e:#}")))?;
+        ensure_same_instance(&self.instance_name, &parts.instance_name)?;
         self.storage
             .init(self.rt.clone(), &parts.s3_prefix)
             .await
@@ -299,6 +302,18 @@ impl FunrunService {
                 },
             }
         }
+    }
+}
+
+/// The key broker signs for `serving`, so a request for another instance
+/// must not run here. Neither name is echoed back.
+fn ensure_same_instance(serving: &str, requested: &str) -> Result<(), Status> {
+    if serving == requested {
+        Ok(())
+    } else {
+        Err(Status::failed_precondition(
+            "RunRequest is for a different instance than this worker serves",
+        ))
     }
 }
 
@@ -423,7 +438,10 @@ mod tests {
         Arc,
     };
 
-    use super::InFlightGuard;
+    use super::{
+        ensure_same_instance,
+        InFlightGuard,
+    };
 
     #[test]
     fn admission_rejects_at_limit_and_guard_drop_frees_a_slot() {
@@ -435,6 +453,23 @@ mod tests {
         drop(a);
         let _c = InFlightGuard::try_acquire(&counter, 2).unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn request_for_another_instance_is_rejected_without_leaking_names() {
+        let status = ensure_same_instance("carnitas", "barbacoa").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            !status.message().contains("carnitas"),
+            "{}",
+            status.message()
+        );
+        assert!(
+            !status.message().contains("barbacoa"),
+            "{}",
+            status.message()
+        );
+        ensure_same_instance("carnitas", "carnitas").unwrap();
     }
 
     #[test]
