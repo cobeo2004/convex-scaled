@@ -32,22 +32,31 @@ keyInput.addEventListener('input', () => {
   sessionStorage.setItem('funrunAdminKey', keyInput.value);
 });
 
+function esc(s) {
+  return String(s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
 function poolTable(name, workers) {
-  if (workers === null) return `<h2>${name}</h2><p>disabled</p>`;
-  const now = Date.now();
+  if (workers === null) return `<h2>${esc(name)}</h2><p>disabled</p>`;
   const rows = workers.map(w => {
     const age = w.lastReportMs;
-    const stale = age === null || age > 2000;
-    const ageText = age === null ? 'never' : `${(age / 1000).toFixed(1)}s`;
+    // A proxy pool never gets its own load reports (`lastReportMs` is
+    // always null there), so null means "n/a", not "stale".
+    const stale = age !== null && age > 2000;
+    const ageText = age === null ? 'n/a' : `${(age / 1000).toFixed(1)}s`;
     return `<tr class="${stale ? 'stale' : ''}">
-      <td>${w.addr}</td>
+      <td>${esc(w.addr)}</td>
       <td><span class="dot ${w.healthy ? 'up' : 'down'}"></span></td>
       <td>${w.load.toFixed(2)}</td>
       <td>${w.inFlight}</td>
-      <td>${ageText}${stale ? ' (stale)' : ''}</td>
+      <td>${esc(ageText)}${stale ? ' (stale)' : ''}</td>
     </tr>`;
   }).join('');
-  return `<h2>${name}</h2>
+  return `<h2>${esc(name)}</h2>
     <table>
       <tr><th>addr</th><th>healthy</th><th>load</th><th>in-flight</th><th>last report</th></tr>
       ${rows || '<tr><td colspan="5">no workers</td></tr>'}
@@ -73,7 +82,7 @@ async function poll() {
     const data = await res.json();
     const c = data.conductor;
     document.getElementById('conductor').innerHTML = `
-      <p>version ${c.version} · up ${c.uptimeS}s · fallback ${c.fallback} ·
+      <p>version ${esc(c.version)} · up ${c.uptimeS}s · fallback ${esc(c.fallback)} ·
       fallbacks isolate=${c.fallbackTotal.isolate} deploy=${c.fallbackTotal.deploy}
       node=${c.fallbackTotal.node}</p>`;
     document.getElementById('pools').innerHTML =

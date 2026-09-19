@@ -261,7 +261,7 @@ impl LocalConfig {
             .unwrap_or(format!("http://127.0.0.1:{}", self.port).into());
         // Allow empty origin so you can start up a self-hosted backend without
         // knowing its url yet.
-        if !origin.is_empty() && !origin.starts_with("https://") && !origin.starts_with("http://") {
+        if !origin.is_empty() && !is_http_url(&origin) {
             anyhow::bail!(
                 "Origin url should start with https:// or http:// but got '{}'",
                 origin
@@ -277,7 +277,7 @@ impl LocalConfig {
             .unwrap_or(format!("http://127.0.0.1:{}", self.site_proxy_port).into());
         // Allow empty site so you can start up a self-hosted backend without
         // knowing its url yet.
-        if !site.is_empty() && !site.starts_with("https://") && !site.starts_with("http://") {
+        if !site.is_empty() && !is_http_url(&site) {
             anyhow::bail!(
                 "Site url should start with https:// or http:// but got '{}'",
                 site
@@ -328,7 +328,7 @@ impl LocalConfig {
         match &self.funrun_node_callback_origin {
             Some(o) => {
                 anyhow::ensure!(
-                    o.starts_with("https://") || o.starts_with("http://"),
+                    is_http_url(o),
                     "FUNRUN_NODE_CALLBACK_ORIGIN should start with https:// or http:// but got \
                      '{o}'"
                 );
@@ -337,6 +337,12 @@ impl LocalConfig {
             None => self.convex_origin_url(),
         }
     }
+}
+
+/// Whether `s` starts with a scheme `convex_origin_url`, `convex_site_url` and
+/// `node_callback_origin` all accept.
+fn is_http_url(s: &str) -> bool {
+    s.starts_with("https://") || s.starts_with("http://")
 }
 
 #[cfg(test)]

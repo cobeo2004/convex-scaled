@@ -172,6 +172,7 @@ impl WorkerPool {
                 last_report: None,
             },
         );
+        self.report_healthy();
     }
 
     pub fn has_healthy(&self) -> bool {
@@ -232,8 +233,10 @@ impl WorkerPool {
 
     fn sync_workers<RT: Runtime>(self: &Arc<Self>, rt: &RT, addrs: &BTreeSet<String>, token: &str) {
         let mut workers = self.workers.lock();
+        let before = workers.len();
         // Dropping a worker aborts its WatchLoad task.
         workers.retain(|addr, _| addrs.contains(addr));
+        let worker_removed = workers.len() < before;
         for addr in addrs {
             if workers.contains_key(addr) {
                 continue;
@@ -266,6 +269,12 @@ impl WorkerPool {
                 },
             );
         }
+        drop(workers);
+        // New workers start unhealthy, so only a removal can change the
+        // healthy count here.
+        if worker_removed {
+            self.report_healthy();
+        }
     }
 
     async fn watch_load<RT: Runtime>(
@@ -295,6 +304,7 @@ impl WorkerPool {
                                     w.state.healthy = true;
                                     w.last_report = Some(Instant::now());
                                 });
+                                self.report_healthy();
                                 log_gauge_with_labels(
                                     &FUNRUN_WORKER_LOAD_INFO,
                                     report.effective_load,
@@ -322,20 +332,33 @@ impl WorkerPool {
                 },
             }
             self.update(&addr, |w| w.state.healthy = false);
+            self.report_healthy();
             rt.wait(delay).await;
         }
     }
 
-    /// Applies `f` to the worker at `addr`, then reports the pool's healthy
-    /// worker count (labelled with this pool's `name`) so it stays accurate
-    /// after every state change.
+    /// Applies `f` to the worker at `addr`. Callers that change a worker's
+    /// health must also call `report_healthy`; this alone does not, so it
+    /// stays cheap to call from a hot path like the in-flight counter.
     fn update(&self, addr: &str, f: impl FnOnce(&mut Worker)) {
         let mut workers = self.workers.lock();
         if let Some(w) = workers.get_mut(addr) {
             f(w);
         }
-        let healthy = workers.values().filter(|w| w.state.healthy).count();
-        drop(workers);
+    }
+
+    /// Reports the pool's healthy worker count (labelled with this pool's
+    /// `name`). Call this only from the paths that actually change a
+    /// worker's health (`insert_healthy`, worker removal, and the
+    /// `watch_load` success/failure transitions) — not from the in-flight
+    /// counter, which does not affect health.
+    fn report_healthy(&self) {
+        let healthy = self
+            .workers
+            .lock()
+            .values()
+            .filter(|w| w.state.healthy)
+            .count();
         log_gauge_with_labels(
             &FUNRUN_POOL_HEALTHY_INFO,
             healthy as f64,
@@ -422,12 +445,15 @@ mod tests {
 
     use super::{
         check_protocol_version,
+        connect_for_test,
         prefer_family,
         reconnect_delay,
+        WorkerPool,
         WorkerState,
         MAX_RECONNECT_DELAY,
         RECONNECT_DELAY,
     };
+    use crate::metrics::FUNRUN_POOL_HEALTHY_INFO;
 
     #[test]
     fn dual_stack_workers_route_within_the_preferred_family() {
@@ -489,5 +515,28 @@ mod tests {
     fn lost_connection_reconnects_quickly() {
         let lost = Status::unavailable("connection reset");
         assert_eq!(reconnect_delay(MAX_RECONNECT_DELAY, &lost), RECONNECT_DELAY);
+    }
+
+    // ponytail: `connect_for_test` lazily connects, which needs a Tokio
+    // reactor even though nothing here awaits; `#[tokio::test]` supplies one.
+    #[tokio::test]
+    async fn in_flight_decrement_does_not_change_the_healthy_gauge() {
+        // Unique pool name: FUNRUN_POOL_HEALTHY_INFO is a process-global
+        // metric, and other tests reuse WorkerPool::empty()'s "test" name.
+        let pool = WorkerPool::named("gauge_test_in_flight_decrement");
+        pool.insert_healthy("w:1".to_string(), connect_for_test("w:1"));
+        pool.insert_healthy("w:2".to_string(), connect_for_test("w:2"));
+        let healthy_gauge = || {
+            FUNRUN_POOL_HEALTHY_INFO
+                .with_label_values(&["gauge_test_in_flight_decrement"])
+                .get()
+        };
+        assert_eq!(healthy_gauge(), 2.0);
+
+        // Completing a request changes only `in_flight`, not health, so the
+        // healthy gauge must still read correctly afterwards.
+        drop(pool.begin("w:1"));
+        assert_eq!(healthy_gauge(), 2.0);
+        assert!(pool.snapshot().iter().all(|w| w.healthy));
     }
 }
