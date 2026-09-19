@@ -155,6 +155,10 @@ impl WorkerPool {
         );
     }
 
+    pub fn has_healthy(&self) -> bool {
+        self.workers.lock().values().any(|w| w.state.healthy)
+    }
+
     pub(crate) fn empty() -> Arc<Self> {
         Arc::new(Self {
             workers: Mutex::new(BTreeMap::new()),

@@ -19,6 +19,7 @@ function_runner = { workspace = true }
 funrun_proto = { workspace = true }
 futures = { workspace = true }
 keybroker = { workspace = true }
+metrics = { workspace = true }
 model = { workspace = true }
 parking_lot = { workspace = true }
 pb = { workspace = true }

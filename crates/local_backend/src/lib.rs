@@ -298,7 +298,7 @@ pub async fn make_app(
             )?;
             Arc::new(RemoteFunctionRunner::new(
                 pool,
-                local_runner,
+                None,
                 database.clone(),
                 deployment,
                 config.convex_origin_url()?,

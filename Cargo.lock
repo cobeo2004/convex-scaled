@@ -8613,6 +8613,7 @@ dependencies = [
  "funrun_proto",
  "futures",
  "keybroker",
+ "metrics",
  "model",
  "parking_lot",
  "pb",
