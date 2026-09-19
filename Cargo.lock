@@ -8622,6 +8622,7 @@ dependencies = [
  "pb",
  "pb_funrun",
  "rand 0.9.4",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",

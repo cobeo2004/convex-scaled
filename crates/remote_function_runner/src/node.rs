@@ -36,9 +36,9 @@ use crate::{
     Terminal,
 };
 
-/// Runs `"use node"` actions on the Node worker pool. `fallback` is set only
-/// when `FUNRUN_NODE_WORKERS` is unset, in which case Node code still runs
-/// in process (via `LocalNodeExecutor`) even under `FUNCTION_RUNNER=remote`.
+/// Runs `"use node"` actions on the Node worker pool. `fallback` is set when
+/// `FUNRUN_FALLBACK=local`, in which case Node code runs in process (via
+/// `LocalNodeExecutor`) while the pool has no healthy worker.
 pub struct RemoteNodeExecutor {
     pool: Arc<WorkerPool>,
     fallback: Option<Arc<dyn NodeExecutor>>,

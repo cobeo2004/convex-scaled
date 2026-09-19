@@ -102,6 +102,7 @@ use node_executor::{
 use performance_stats::exporter::register_prometheus_exporter;
 use remote_function_runner::{
     pool::WorkerPool,
+    status::FunrunStatus,
     RemoteFunctionRunner,
     RemoteNodeExecutor,
 };
@@ -130,6 +131,7 @@ pub mod deployment_audit_log;
 pub mod deployment_info;
 pub mod deployment_state;
 pub mod environment_variables;
+pub mod funrun_status;
 pub mod http_actions;
 pub mod log_sinks;
 pub mod logs;
@@ -160,6 +162,8 @@ pub struct LocalAppState {
     pub instance_name: String,
     pub application: Application<ProdRuntime>,
     pub zombify_rx: async_broadcast::Receiver<()>,
+    /// `Some` only under `FUNCTION_RUNNER=remote`; backs `/funrun/status`.
+    pub funrun_status: Option<Arc<FunrunStatus>>,
 }
 
 impl LocalAppState {
@@ -250,6 +254,7 @@ pub async fn make_app(
     let node_process_timeout = *NODE_ACTION_USER_TIMEOUT + Duration::from_secs(5);
     let local_node: Arc<dyn NodeExecutor> =
         Arc::new(LocalNodeExecutor::new(node_process_timeout).await?);
+    let mut node_pool_for_status: Option<Arc<WorkerPool>> = None;
     let (node_executor, node_origin): (Arc<dyn NodeExecutor>, ConvexOrigin) =
         match (remote, config.node_workers()) {
             (true, Some(target)) => {
@@ -268,6 +273,7 @@ pub async fn make_app(
                     worker_token(instance_secret),
                     "node",
                 )?;
+                node_pool_for_status = Some(pool.clone());
                 let fallback =
                     (config.funrun_fallback == FunrunFallback::Local).then(|| local_node.clone());
                 (Arc::new(RemoteNodeExecutor::new(pool, fallback)), origin)
@@ -317,6 +323,7 @@ pub async fn make_app(
         database.clone(),
         fetch_client.clone(),
     )?;
+    let mut isolate_pool_for_status: Option<Arc<WorkerPool>> = None;
     let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> = match config.function_runner {
         FunctionRunnerMode::Local => Arc::new(local_runner),
         FunctionRunnerMode::Remote => {
@@ -333,6 +340,7 @@ pub async fn make_app(
                 worker_token(instance_secret),
                 "isolate",
             )?;
+            isolate_pool_for_status = Some(pool.clone());
             Arc::new(RemoteFunctionRunner::new(
                 pool,
                 (config.funrun_fallback == FunrunFallback::Local).then_some(local_runner),
@@ -343,6 +351,16 @@ pub async fn make_app(
             ))
         },
     };
+    let funrun_status = isolate_pool_for_status.map(|isolate| {
+        Arc::new(FunrunStatus::new(
+            isolate,
+            node_pool_for_status,
+            match config.funrun_fallback {
+                FunrunFallback::Fail => "fail",
+                FunrunFallback::Local => "local",
+            },
+        ))
+    });
 
     let persistence_reader = persistence.reader();
     let application = Application::new(
@@ -422,6 +440,7 @@ pub async fn make_app(
         instance_name,
         application,
         zombify_rx,
+        funrun_status,
     };
 
     Ok(app_state)

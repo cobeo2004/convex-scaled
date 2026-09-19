@@ -152,6 +152,7 @@ mod node;
 pub mod pick;
 pub mod pool;
 pub mod retry;
+pub mod status;
 
 pub use crate::node::RemoteNodeExecutor;
 

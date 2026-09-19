@@ -88,6 +88,7 @@ use crate::{
         platform_router,
         update_environment_variables,
     },
+    funrun_status,
     http_actions::http_action_handler,
     logs::{
         stream_function_logs,
@@ -388,7 +389,8 @@ pub fn router(st: LocalAppState) -> Router {
         .nest("/actions", action_callback_routes(st.clone()))
         .nest("/export", snapshot_export_routes)
         .nest("/streaming_import", streaming_import_routes())
-        .nest("/v1", platform_routes);
+        .nest("/v1", platform_routes)
+        .route("/funrun/status", get(funrun_status::api_status));
 
     // Endpoints migrated to use the RouterState trait instead of application.
     let (public_routes, public_openapi) = OpenApiRouter::with_openapi(PublicApiDoc::openapi())
@@ -426,6 +428,7 @@ pub fn router(st: LocalAppState) -> Router {
     Router::new()
         .nest("/api", api_routes)
         .merge(health_check_routes(version))
+        .route("/funrun/status", get(funrun_status::page))
         .layer(cors())
         .with_state(st)
         .merge(migrated)

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Funrun status</title>
+<style>
+  body { font: 14px/1.4 -apple-system, sans-serif; margin: 2rem; color: #111; }
+  h1 { font-size: 1.1rem; }
+  input { font: inherit; padding: 0.3rem; width: 24rem; }
+  table { border-collapse: collapse; margin: 1rem 0; width: 100%; max-width: 48rem; }
+  th, td { border: 1px solid #ccc; padding: 0.3rem 0.6rem; text-align: left; }
+  .dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; }
+  .dot.up { background: #2a7; }
+  .dot.down { background: #c33; }
+  .stale { color: #c33; font-weight: bold; }
+  #err { color: #c33; }
+</style>
+</head>
+<body>
+<h1>Funrun status</h1>
+<p>
+  Admin key:
+  <input id="key" type="password" placeholder="Convex admin key">
+</p>
+<p id="err"></p>
+<div id="conductor"></div>
+<div id="pools"></div>
+<script>
+const keyInput = document.getElementById('key');
+keyInput.value = sessionStorage.getItem('funrunAdminKey') || '';
+keyInput.addEventListener('input', () => {
+  sessionStorage.setItem('funrunAdminKey', keyInput.value);
+});
+
+function poolTable(name, workers) {
+  if (workers === null) return `<h2>${name}</h2><p>disabled</p>`;
+  const now = Date.now();
+  const rows = workers.map(w => {
+    const age = w.lastReportMs;
+    const stale = age === null || age > 2000;
+    const ageText = age === null ? 'never' : `${(age / 1000).toFixed(1)}s`;
+    return `<tr class="${stale ? 'stale' : ''}">
+      <td>${w.addr}</td>
+      <td><span class="dot ${w.healthy ? 'up' : 'down'}"></span></td>
+      <td>${w.load.toFixed(2)}</td>
+      <td>${w.inFlight}</td>
+      <td>${ageText}${stale ? ' (stale)' : ''}</td>
+    </tr>`;
+  }).join('');
+  return `<h2>${name}</h2>
+    <table>
+      <tr><th>addr</th><th>healthy</th><th>load</th><th>in-flight</th><th>last report</th></tr>
+      ${rows || '<tr><td colspan="5">no workers</td></tr>'}
+    </table>`;
+}
+
+async function poll() {
+  const key = keyInput.value.trim();
+  const err = document.getElementById('err');
+  if (!key) {
+    err.textContent = 'Enter an admin key to see live status.';
+    return;
+  }
+  try {
+    const res = await fetch('/api/funrun/status', {
+      headers: { Authorization: 'Convex ' + key },
+    });
+    if (!res.ok) {
+      err.textContent = `${res.status} ${res.statusText}`;
+      return;
+    }
+    err.textContent = '';
+    const data = await res.json();
+    const c = data.conductor;
+    document.getElementById('conductor').innerHTML = `
+      <p>version ${c.version} · up ${c.uptimeS}s · fallback ${c.fallback} ·
+      fallbacks isolate=${c.fallbackTotal.isolate} deploy=${c.fallbackTotal.deploy}
+      node=${c.fallbackTotal.node}</p>`;
+    document.getElementById('pools').innerHTML =
+      poolTable('isolate', data.pools.isolate) + poolTable('node', data.pools.node);
+  } catch (e) {
+    err.textContent = String(e);
+  }
+}
+
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

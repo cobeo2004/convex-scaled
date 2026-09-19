@@ -14,7 +14,10 @@ use std::{
         },
         Arc,
     },
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use common::{
@@ -32,6 +35,10 @@ use funrun_proto::{
     auth::BearerInterceptor,
     FUNRUN_PROTOCOL_VERSION,
 };
+use metrics::{
+    log_gauge_with_labels,
+    StaticMetricLabel,
+};
 use parking_lot::Mutex;
 use pb_funrun::funrun::{
     funrun_client::FunrunClient,
@@ -44,11 +51,16 @@ use tonic::{
 };
 
 use crate::{
+    metrics::{
+        FUNRUN_POOL_HEALTHY_INFO,
+        FUNRUN_WORKER_LOAD_INFO,
+    },
     pick::{
         pick,
         WorkerState,
     },
     retry::is_transport_failure,
+    status::WorkerStatus,
 };
 
 pub type FunrunChannel = FunrunClient<InterceptedService<Channel, BearerInterceptor>>;
@@ -71,6 +83,8 @@ struct Worker {
     state: WorkerState,
     // Aborts the worker's WatchLoad task when the worker leaves the pool.
     _watch: Option<Box<dyn SpawnHandle>>,
+    // Set on every `WatchLoad` report; `None` until the first one arrives.
+    last_report: Option<Instant>,
 }
 
 pub struct WorkerPool {
@@ -78,7 +92,6 @@ pub struct WorkerPool {
     // Family of the first address DNS returned; see `prefer_family`.
     prefer_ipv6: AtomicBool,
     /// `"isolate"` or `"node"`; labels this pool's metrics.
-    #[allow(dead_code)] // ponytail: read by the pool gauges (Task 8).
     name: &'static str,
 }
 
@@ -156,6 +169,7 @@ impl WorkerPool {
                     healthy: true,
                 },
                 _watch: None,
+                last_report: None,
             },
         );
     }
@@ -164,9 +178,31 @@ impl WorkerPool {
         self.workers.lock().values().any(|w| w.state.healthy)
     }
 
+    /// A point-in-time view of every worker in the pool, for `/funrun/status`.
+    pub fn snapshot(&self) -> Vec<WorkerStatus> {
+        self.workers
+            .lock()
+            .values()
+            .map(|w| WorkerStatus {
+                addr: w.state.addr.clone(),
+                healthy: w.state.healthy,
+                load: w.state.load,
+                in_flight: w.state.in_flight,
+                last_report_ms: w.last_report.map(|t| t.elapsed().as_millis() as u64),
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn empty() -> Arc<Self> {
         Self::named("test")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_last_report_for_test(&self, addr: &str, at: Instant) {
+        if let Some(w) = self.workers.lock().get_mut(addr) {
+            w.last_report = Some(at);
+        }
     }
 
     fn named(name: &'static str) -> Arc<Self> {
@@ -226,6 +262,7 @@ impl WorkerPool {
                         healthy: false,
                     },
                     _watch: Some(watch),
+                    last_report: None,
                 },
             );
         }
@@ -253,10 +290,19 @@ impl WorkerPool {
                                     break;
                                 }
                                 delay = RECONNECT_DELAY;
-                                self.update(&addr, |s| {
-                                    s.load = report.effective_load;
-                                    s.healthy = true;
+                                self.update(&addr, |w| {
+                                    w.state.load = report.effective_load;
+                                    w.state.healthy = true;
+                                    w.last_report = Some(Instant::now());
                                 });
+                                log_gauge_with_labels(
+                                    &FUNRUN_WORKER_LOAD_INFO,
+                                    report.effective_load,
+                                    vec![
+                                        StaticMetricLabel::new("pool", self.name),
+                                        StaticMetricLabel::new("addr", addr.clone()),
+                                    ],
+                                );
                             },
                             Ok(None) => {
                                 tracing::warn!("funrun worker {addr} ended WatchLoad");
@@ -275,15 +321,26 @@ impl WorkerPool {
                     delay = reconnect_delay(delay, &status);
                 },
             }
-            self.update(&addr, |s| s.healthy = false);
+            self.update(&addr, |w| w.state.healthy = false);
             rt.wait(delay).await;
         }
     }
 
-    fn update(&self, addr: &str, f: impl FnOnce(&mut WorkerState)) {
-        if let Some(w) = self.workers.lock().get_mut(addr) {
-            f(&mut w.state);
+    /// Applies `f` to the worker at `addr`, then reports the pool's healthy
+    /// worker count (labelled with this pool's `name`) so it stays accurate
+    /// after every state change.
+    fn update(&self, addr: &str, f: impl FnOnce(&mut Worker)) {
+        let mut workers = self.workers.lock();
+        if let Some(w) = workers.get_mut(addr) {
+            f(w);
         }
+        let healthy = workers.values().filter(|w| w.state.healthy).count();
+        drop(workers);
+        log_gauge_with_labels(
+            &FUNRUN_POOL_HEALTHY_INFO,
+            healthy as f64,
+            vec![StaticMetricLabel::new("pool", self.name)],
+        );
     }
 }
 
@@ -294,8 +351,9 @@ pub struct InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.pool
-            .update(&self.addr, |s| s.in_flight = s.in_flight.saturating_sub(1));
+        self.pool.update(&self.addr, |w| {
+            w.state.in_flight = w.state.in_flight.saturating_sub(1)
+        });
     }
 }
 
