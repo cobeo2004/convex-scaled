@@ -15,9 +15,10 @@ docker compose logs conductor | grep -i "function_host\|error" | head
 docker compose exec conductor ./generate_admin_key.sh
 ```
 
-`FUNCTION_RUNNER`, `FUNRUN_WORKERS`, `FUNRUN_ROUTING`, `CONDUCTOR_CPUS`,
-`WORKER_CPUS` are all overridable env vars (defaults: `remote`, `worker:7400`,
-`direct`, `4`, `4`).
+`FUNCTION_RUNNER`, `FUNRUN_WORKERS`, `FUNRUN_ROUTING`, `FUNCTION_HOST_LISTEN`,
+`FUNRUN_LISTEN`, `CONDUCTOR_CPUS`, `WORKER_CPUS` are all overridable env vars
+(defaults: `remote`, `worker:7400`, `direct`, `0.0.0.0:7401`, `0.0.0.0:7400`,
+`4`, `4`).
 
 To route through Envoy instead of direct DNS-based routing:
 

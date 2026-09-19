@@ -91,7 +91,7 @@ services:
       FUNCTION_RUNNER: ${FUNCTION_RUNNER:-remote}
       FUNRUN_WORKERS: ${FUNRUN_WORKERS:-worker:7400}
       FUNRUN_ROUTING: ${FUNRUN_ROUTING:-direct}
-      FUNCTION_HOST_LISTEN: 0.0.0.0:7401
+      FUNCTION_HOST_LISTEN: ${FUNCTION_HOST_LISTEN:-0.0.0.0:7401}
     ports: ["3210:3210", "3211:3211"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -111,7 +111,7 @@ services:
     environment:
       <<: *common-env
       FUNCTION_HOST_URL: http://conductor:7401
-      FUNRUN_LISTEN: 0.0.0.0:7400
+      FUNRUN_LISTEN: ${FUNRUN_LISTEN:-0.0.0.0:7400}
       FUNRUN_METRICS_LISTEN: 0.0.0.0:9100
     depends_on: [conductor]
     # > BACKEND_REQUEST_DRAIN_TIMEOUT (15 s): SIGKILL must not cut a drain short.
