@@ -7,7 +7,13 @@ use std::{
         BTreeSet,
     },
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+        Arc,
+    },
     time::Duration,
 };
 
@@ -69,6 +75,8 @@ struct Worker {
 
 pub struct WorkerPool {
     workers: Mutex<BTreeMap<String, Worker>>,
+    // Family of the first address DNS returned; see `prefer_family`.
+    prefer_ipv6: AtomicBool,
 }
 
 impl WorkerPool {
@@ -103,7 +111,10 @@ impl WorkerPool {
         exclude: &BTreeSet<String>,
     ) -> Option<(String, FunrunChannel)> {
         let workers = self.workers.lock();
-        let states: Vec<WorkerState> = workers.values().map(|w| w.state.clone()).collect();
+        let states = prefer_family(
+            workers.values().map(|w| w.state.clone()).collect(),
+            self.prefer_ipv6.load(Ordering::Relaxed),
+        );
         let addr = &pick(
             &states,
             module,
@@ -147,6 +158,7 @@ impl WorkerPool {
     pub(crate) fn empty() -> Arc<Self> {
         Arc::new(Self {
             workers: Mutex::new(BTreeMap::new()),
+            prefer_ipv6: AtomicBool::new(false),
         })
     }
 
@@ -154,7 +166,11 @@ impl WorkerPool {
         loop {
             match tokio::net::lookup_host(&target).await {
                 Ok(addrs) => {
-                    let addrs = one_family(addrs.collect());
+                    let addrs: Vec<SocketAddr> = addrs.collect();
+                    if let Some(first) = addrs.first() {
+                        self.prefer_ipv6.store(first.is_ipv6(), Ordering::Relaxed);
+                    }
+                    let addrs: BTreeSet<String> = addrs.iter().map(|a| a.to_string()).collect();
                     self.sync_workers(&rt, &addrs, &token);
                 },
                 Err(e) => tracing::warn!("funrun worker lookup of {target} failed: {e}"),
@@ -309,19 +325,18 @@ pub(crate) fn connect_for_test(addr: &str) -> FunrunChannel {
     connect(addr, "test-token".to_string()).expect("valid address")
 }
 
-/// Dual-stack DNS returns an A and an AAAA record per worker; keeping both
-/// would count each worker twice. Keep the family of the first address, which
-/// the resolver orders by what this host can reach (RFC 6724).
-fn one_family(addrs: Vec<SocketAddr>) -> BTreeSet<String> {
-    let Some(first) = addrs.first() else {
-        return BTreeSet::new();
-    };
-    let ipv6 = first.is_ipv6();
-    addrs
-        .iter()
-        .filter(|a| a.is_ipv6() == ipv6)
-        .map(|a| a.to_string())
-        .collect()
+/// Dual-stack DNS lists each worker once per family. Route within the family
+/// the resolver put first (RFC 6724 order) while any of its workers is
+/// healthy, so each worker counts once. The other family stays in the pool as
+/// a fallback: that order is a preference, not proof the route works, and
+/// workers may listen on IPv4 only.
+fn prefer_family(states: Vec<WorkerState>, prefer_ipv6: bool) -> Vec<WorkerState> {
+    let preferred = |s: &WorkerState| s.addr.starts_with('[') == prefer_ipv6;
+    if states.iter().any(|s| s.healthy && preferred(s)) {
+        states.into_iter().filter(preferred).collect()
+    } else {
+        states
+    }
 }
 
 #[cfg(test)]
@@ -334,32 +349,40 @@ mod tests {
 
     use super::{
         check_protocol_version,
-        one_family,
+        prefer_family,
         reconnect_delay,
+        WorkerState,
         MAX_RECONNECT_DELAY,
         RECONNECT_DELAY,
     };
 
     #[test]
-    fn dual_stack_workers_are_counted_once() {
-        let addrs = |list: &[&str]| list.iter().map(|a| a.parse().unwrap()).collect();
-        let v6_first = one_family(addrs(&[
-            "[fd12::1]:7400",
-            "10.0.0.1:7400",
-            "[fd12::2]:7400",
-        ]));
+    fn dual_stack_workers_route_within_the_preferred_family() {
+        let state = |addr: &str, healthy| WorkerState {
+            addr: addr.to_string(),
+            load: 0.0,
+            in_flight: 0,
+            healthy,
+        };
+        let addrs = |states: Vec<WorkerState>| -> Vec<String> {
+            states.into_iter().map(|s| s.addr).collect()
+        };
+        let pool = || {
+            vec![
+                state("10.0.0.1:7400", true),
+                state("[fd12::1]:7400", true),
+                state("[fd12::2]:7400", false),
+            ]
+        };
         assert_eq!(
-            v6_first,
+            addrs(prefer_family(pool(), true)),
             ["[fd12::1]:7400", "[fd12::2]:7400"]
-                .map(String::from)
-                .into()
         );
-        let v4_first = one_family(addrs(&["10.0.0.1:7400", "[fd12::1]:7400", "10.0.0.2:7400"]));
-        assert_eq!(
-            v4_first,
-            ["10.0.0.1:7400", "10.0.0.2:7400"].map(String::from).into()
-        );
-        assert!(one_family(vec![]).is_empty());
+        assert_eq!(addrs(prefer_family(pool(), false)), ["10.0.0.1:7400"]);
+        // No healthy IPv6 worker (broken route, IPv4-only listeners): fall
+        // back.
+        let v6_down = vec![state("10.0.0.1:7400", true), state("[fd12::1]:7400", false)];
+        assert_eq!(addrs(prefer_family(v6_down, true)).len(), 2);
     }
 
     #[test]

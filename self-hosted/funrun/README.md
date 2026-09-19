@@ -63,8 +63,9 @@ and are overridable env vars; **defaults are for local development only.**
 - Listeners default to `0.0.0.0` because containers without IPv6 (Docker
   Desktop) can't bind `[::]`. On IPv6 private networks (Railway) set
   `FUNRUN_LISTEN=[::]:7400` and `FUNCTION_HOST_LISTEN=[::]:7401`. When a
-  worker's DNS name returns both families, the conductor keeps only the first
-  address family the resolver returns, so each worker counts once.
+  worker's DNS name returns both families, the conductor routes within the
+  family the resolver returns first, so each worker counts once, and falls back
+  to the other family while none of the preferred addresses is healthy.
 - `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart uploads
   without a KMS/SSE-S3 key configured.
 
