@@ -63,14 +63,16 @@ services:
         AWS_REGION: us-east-1,
       }
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "set -e;
-       for b in convex-exports convex-imports convex-modules convex-files
-      convex-search;
-       do aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket $$b
-      2>/dev/null ||
-          aws --endpoint-url http://rustfs:9000 s3 mb s3://$$b;
-       done"
+    # Literal block (`|`): formatters can't re-wrap it into a broken script.
+    command:
+      - |
+        set -e
+        s3="aws --endpoint-url http://rustfs:9000"
+        for b in convex-exports convex-imports convex-modules \
+          convex-files convex-search; do
+          $$s3 s3api head-bucket --bucket "$$b" 2>/dev/null ||
+            $$s3 s3 mb "s3://$$b"
+        done
 
   conductor:
     build: { context: ../.., dockerfile: self-hosted/funrun/Dockerfile }
@@ -89,7 +91,7 @@ services:
       FUNCTION_RUNNER: ${FUNCTION_RUNNER:-remote}
       FUNRUN_WORKERS: ${FUNRUN_WORKERS:-worker:7400}
       FUNRUN_ROUTING: ${FUNRUN_ROUTING:-direct}
-      FUNCTION_HOST_LISTEN: 0.0.0.0:7401
+      FUNCTION_HOST_LISTEN: ${FUNCTION_HOST_LISTEN:-0.0.0.0:7401}
     ports: ["3210:3210", "3211:3211"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -109,7 +111,7 @@ services:
     environment:
       <<: *common-env
       FUNCTION_HOST_URL: http://conductor:7401
-      FUNRUN_LISTEN: 0.0.0.0:7400
+      FUNRUN_LISTEN: ${FUNRUN_LISTEN:-0.0.0.0:7400}
       FUNRUN_METRICS_LISTEN: 0.0.0.0:9100
     depends_on: [conductor]
     # > BACKEND_REQUEST_DRAIN_TIMEOUT (15 s): SIGKILL must not cut a drain short.

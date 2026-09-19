@@ -15,9 +15,10 @@ docker compose logs conductor | grep -i "function_host\|error" | head
 docker compose exec conductor ./generate_admin_key.sh
 ```
 
-`FUNCTION_RUNNER`, `FUNRUN_WORKERS`, `FUNRUN_ROUTING`, `CONDUCTOR_CPUS`,
-`WORKER_CPUS` are all overridable env vars (defaults: `remote`, `worker:7400`,
-`direct`, `4`, `4`).
+`FUNCTION_RUNNER`, `FUNRUN_WORKERS`, `FUNRUN_ROUTING`, `FUNCTION_HOST_LISTEN`,
+`FUNRUN_LISTEN`, `CONDUCTOR_CPUS`, `WORKER_CPUS` are all overridable env vars
+(defaults: `remote`, `worker:7400`, `direct`, `0.0.0.0:7401`, `0.0.0.0:7400`,
+`4`, `4`).
 
 To route through Envoy instead of direct DNS-based routing:
 
@@ -59,6 +60,12 @@ and are overridable env vars; **defaults are for local development only.**
 - The Dockerfile has no `ENTRYPOINT` because the same image serves both the
   conductor (`./run_backend.sh`) and worker (`./funrun_worker`) services, each
   supplying its own `command:`.
+- Listeners default to `0.0.0.0` because containers without IPv6 (Docker
+  Desktop) can't bind `[::]`. On IPv6 private networks (Railway) set
+  `FUNRUN_LISTEN=[::]:7400` and `FUNCTION_HOST_LISTEN=[::]:7401`. When a
+  worker's DNS name returns both families, the conductor routes within the
+  family the resolver returns first, so each worker counts once, and falls back
+  to the other family while none of the preferred addresses is healthy.
 - `AWS_S3_DISABLE_SSE: "true"` is set because RustFS rejects multipart uploads
   without a KMS/SSE-S3 key configured.
 
