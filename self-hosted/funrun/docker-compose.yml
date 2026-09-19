@@ -1,0 +1,143 @@
+name: convex-funrun
+x-common-env: &common-env
+  INSTANCE_NAME: convex-self-hosted
+  INSTANCE_SECRET:
+    ${INSTANCE_SECRET:?set INSTANCE_SECRET (openssl rand -hex 32)}
+  CONVEX_CLOUD_ORIGIN: http://127.0.0.1:3210
+  CONVEX_SITE_ORIGIN: http://127.0.0.1:3211
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+  AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+  S3_ENDPOINT_URL: http://rustfs:9000
+  AWS_S3_FORCE_PATH_STYLE: "true"
+  S3_STORAGE_EXPORTS_BUCKET: convex-exports
+  S3_STORAGE_SNAPSHOT_IMPORTS_BUCKET: convex-imports
+  S3_STORAGE_MODULES_BUCKET: convex-modules
+  S3_STORAGE_FILES_BUCKET: convex-files
+  S3_STORAGE_SEARCH_BUCKET: convex-search
+  # RustFS rejects multipart uploads without a KMS/SSE-S3 key configured;
+  # disable server-side encryption to match a bare RustFS instance (see
+  # README.md "RustFS storage round trip").
+  AWS_S3_DISABLE_SSE: "true"
+
+services:
+  postgres:
+    image: postgres:17
+    environment: { POSTGRES_PASSWORD: convex, POSTGRES_DB: convex_self_hosted }
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      {
+        test: ["CMD", "pg_isready", "-U", "postgres"],
+        interval: 2s,
+        retries: 30,
+      }
+
+  rustfs:
+    # Pinned to the locally verified beta (`docker image inspect
+    # rustfs/rustfs:latest` -> RepoDigests / org.opencontainers.image.version
+    # v1.0.0-beta.12) so the stack doesn't silently pick up a breaking
+    # `:latest` change.
+    image: rustfs/rustfs@sha256:41fe89380f4120a337790c02af192c3fe7bb55c3edc2e6e9357b487b47c6ab21
+    environment:
+      {
+        RUSTFS_ACCESS_KEY: "${RUSTFS_ACCESS_KEY:-rustfsadmin}",
+        RUSTFS_SECRET_KEY: "${RUSTFS_SECRET_KEY:-rustfsadmin}",
+      }
+    command: ["/data"]
+    volumes: ["rustfsdata:/data"]
+    healthcheck:
+      {
+        test: ["CMD", "curl", "-f", "http://localhost:9000/health"],
+        interval: 2s,
+        retries: 30,
+      }
+
+  buckets:
+    image: amazon/aws-cli
+    depends_on:
+      rustfs: { condition: service_healthy }
+    environment:
+      {
+        AWS_ACCESS_KEY_ID: "${RUSTFS_ACCESS_KEY:-rustfsadmin}",
+        AWS_SECRET_ACCESS_KEY: "${RUSTFS_SECRET_KEY:-rustfsadmin}",
+        AWS_REGION: us-east-1,
+      }
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "set -e;
+       for b in convex-exports convex-imports convex-modules convex-files
+      convex-search;
+       do aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket $$b
+      2>/dev/null ||
+          aws --endpoint-url http://rustfs:9000 s3 mb s3://$$b;
+       done"
+
+  conductor:
+    build: { context: ../.., dockerfile: self-hosted/funrun/Dockerfile }
+    # run_backend.sh derives --instance-name/--instance-secret/--s3-storage/the
+    # postgres DB_SPEC+DB_FLAGS from env (INSTANCE_NAME, INSTANCE_SECRET,
+    # POSTGRES_URL, the S3_* vars) -- LocalConfig's clap does not read those
+    # fields from the environment directly, only the new FUNCTION_RUNNER /
+    # FUNRUN_WORKERS / FUNRUN_ROUTING / FUNCTION_HOST_LISTEN flags do. See
+    # README.md "Operational notes".
+    command: ["./run_backend.sh"]
+    env_file: [knobs.env]
+    environment:
+      <<: *common-env
+      POSTGRES_URL: postgres://postgres:convex@postgres:5432
+      DO_NOT_REQUIRE_SSL: "1"
+      FUNCTION_RUNNER: ${FUNCTION_RUNNER:-remote}
+      FUNRUN_WORKERS: ${FUNRUN_WORKERS:-worker:7400}
+      FUNRUN_ROUTING: ${FUNRUN_ROUTING:-direct}
+      FUNCTION_HOST_LISTEN: 0.0.0.0:7401
+    ports: ["3210:3210", "3211:3211"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      buckets: { condition: service_completed_successfully }
+    healthcheck:
+      {
+        test: ["CMD", "curl", "-f", "http://localhost:3210/version"],
+        interval: 5s,
+        start_period: 10s,
+      }
+    deploy: { resources: { limits: { cpus: "${CONDUCTOR_CPUS:-4}" } } }
+
+  worker:
+    build: { context: ../.., dockerfile: self-hosted/funrun/Dockerfile }
+    command: ["./funrun_worker"]
+    env_file: [knobs.env]
+    environment:
+      <<: *common-env
+      FUNCTION_HOST_URL: http://conductor:7401
+      FUNRUN_LISTEN: 0.0.0.0:7400
+      FUNRUN_METRICS_LISTEN: 0.0.0.0:9100
+    depends_on: [conductor]
+    # > BACKEND_REQUEST_DRAIN_TIMEOUT (15 s): SIGKILL must not cut a drain short.
+    stop_grace_period: 30s
+    deploy: { resources: { limits: { cpus: "${WORKER_CPUS:-4}" } } }
+
+  # Same service as self-hosted/docker/docker-compose.yml. Log in with the key
+  # from `docker compose exec conductor ./generate_admin_key.sh`.
+  dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    # ponytail: the arm64 image fails every page with "Cannot find module
+    # @radix-ui/react-icons-..." (500); amd64 works (emulated on Apple silicon).
+    # Drop this once upstream fixes arm64.
+    platform: linux/amd64
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    ports: ["${DASHBOARD_PORT:-6791}:6791"]
+    environment:
+      NEXT_PUBLIC_DEPLOYMENT_URL: ${NEXT_PUBLIC_DEPLOYMENT_URL:-http://127.0.0.1:3210}
+    depends_on:
+      conductor: { condition: service_healthy }
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    profiles: ["proxy"]
+    volumes: ["./envoy.yaml:/etc/envoy/envoy.yaml:ro"]
+    depends_on: [worker]
+
+volumes:
+  pgdata:
+  rustfsdata:

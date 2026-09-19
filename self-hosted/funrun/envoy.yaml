@@ -1,0 +1,61 @@
+static_resources:
+  listeners:
+    - name: funrun_ingress
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 7400 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: funrun
+                codec_type: HTTP2
+                http2_protocol_options: {}
+                # ponytail: Envoy's HCM stream_idle_timeout defaults to 300s and
+                # would reset a quiet-but-alive action/UDF stream well inside the
+                # conductor's own run timeout; R13 never retries a proxy-mode
+                # call, so that reset would be a silent failure. Disable it and
+                # rely on the route timeout/idle_timeout below as the real bound:
+                # 2400s, longer than the conductor's FUNRUN_RUN_FUNCTION_TIMEOUT
+                # default (35 min = 2100s) so the conductor, not Envoy, reports
+                # the deadline.
+                stream_idle_timeout: 0s
+                route_config:
+                  name: funrun_route
+                  virtual_hosts:
+                    - name: workers
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: workers
+                            timeout: 2400s
+                            idle_timeout: 2400s
+                            hash_policy:
+                              - header:
+                                  header_name: x-convex-module
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: workers
+      type: STRICT_DNS
+      lb_policy: RING_HASH
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: workers
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: worker, port_value: 7400 }
+
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }

@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Remote Mutation Flow",
+    "output": "self-hosted/funrun/docs/mutation-flow.html",
+    "viewBox": [1080, 600],
+    "column_fit": "spread",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "Convex SDK"
+    },
+    {
+      "id": "conductor",
+      "type": "backend",
+      "label": "Conductor",
+      "sublabel": "local_backend"
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "Runner",
+      "sublabel": "RemoteFunctionRunner"
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Worker",
+      "sublabel": "funrun_worker"
+    },
+    {
+      "id": "host",
+      "type": "security",
+      "label": "FunctionHost",
+      "sublabel": "gRPC :7401"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "source of truth"
+    }
+  ],
+  "segments": [
+    { "from": 150, "to": 262, "label": "Dispatch" },
+    { "from": 272, "to": 440, "label": "Execute on worker" },
+    { "from": 450, "to": 530, "label": "Commit" }
+  ],
+  "messages": [
+    {
+      "id": "call",
+      "from": "client",
+      "to": "conductor",
+      "y": 165,
+      "label": "mutation(args)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "run",
+      "from": "conductor",
+      "to": "runner",
+      "y": 192,
+      "label": "run_function(ts)",
+      "variant": "default"
+    },
+    {
+      "id": "execute",
+      "from": "runner",
+      "to": "worker",
+      "y": 220,
+      "label": "Execute + RunRequest",
+      "variant": "emphasis"
+    },
+    {
+      "id": "started",
+      "from": "worker",
+      "to": "runner",
+      "y": 248,
+      "label": "Started",
+      "variant": "return"
+    },
+    {
+      "id": "index-page",
+      "from": "worker",
+      "to": "host",
+      "y": 290,
+      "label": "IndexPage(ts, range)",
+      "variant": "security"
+    },
+    {
+      "id": "snapshot",
+      "from": "host",
+      "to": "db",
+      "y": 318,
+      "label": "snapshot read",
+      "variant": "default"
+    },
+    {
+      "id": "rows",
+      "from": "db",
+      "to": "host",
+      "y": 346,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "page",
+      "from": "host",
+      "to": "worker",
+      "y": 374,
+      "label": "page (byte budget)",
+      "variant": "return"
+    },
+    {
+      "id": "result",
+      "from": "worker",
+      "to": "runner",
+      "y": 410,
+      "label": "Result: writes + read set",
+      "variant": "return"
+    },
+    {
+      "id": "outcome",
+      "from": "runner",
+      "to": "conductor",
+      "y": 435,
+      "label": "outcome",
+      "variant": "return"
+    },
+    {
+      "id": "commit",
+      "from": "conductor",
+      "to": "db",
+      "y": 470,
+      "label": "OCC check + commit",
+      "variant": "emphasis"
+    },
+    {
+      "id": "reply",
+      "from": "conductor",
+      "to": "client",
+      "y": 505,
+      "label": "result",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    { "participant": "conductor", "from": 165, "to": 511, "type": "backend" },
+    { "participant": "runner", "from": 192, "to": 441, "type": "backend" },
+    { "participant": "worker", "from": 220, "to": 416, "type": "backend" },
+    { "participant": "host", "from": 285, "to": 380, "type": "security" },
+    { "participant": "db", "from": 313, "to": 352, "type": "database" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Worker runs, conductor decides",
+      "items": [
+        "The worker executes the UDF in V8 at the conductor's timestamp",
+        "Every index read goes back through FunctionHost",
+        "Writes and the read set return to the conductor"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Same OCC as upstream",
+      "items": [
+        "The conductor commits with upstream's OCC check",
+        "A conflict retries the whole mutation",
+        "Short pages are refilled so the read set stays exact"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Retries",
+      "items": [
+        "Queries and mutations retry on transport failure",
+        "Actions retry only if refused or never delivered",
+        "A run that hits its timeout is never retried"
+      ]
+    }
+  ]
+}

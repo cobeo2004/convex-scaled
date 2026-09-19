@@ -1,0 +1,17 @@
+{
+  "name": "funrun-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "convex": "1.46.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.0"
+  }
+}

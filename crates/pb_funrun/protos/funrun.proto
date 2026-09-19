@@ -1,0 +1,378 @@
+syntax = "proto3";
+
+package funrun;
+
+import "common.proto";
+import "convex_identity.proto";
+import "convex_query_journal.proto";
+import "outcome.proto";
+import "searchlight.proto";
+import "storage.proto";
+import "usage.proto";
+
+// ---------------------------------------------------------------------------
+// Served by funrun_worker.
+service Funrun {
+  // First ExecuteUp carries RunRequest; later ones carry HTTP request body.
+  // Closing the stream cancels execution.
+  rpc Execute(stream ExecuteUp) returns (stream ExecuteDown);
+  rpc WatchLoad(WatchLoadRequest) returns (stream LoadReport);
+}
+
+message ExecuteUp {
+  oneof inner {
+    RunRequest request = 1;
+    BodyChunk http_request_body = 2;
+  }
+}
+
+message BodyChunk {
+  bytes data = 1;
+  bool end = 2;
+}
+
+message ExecuteDown {
+  oneof inner {
+    Started started = 1;
+    outcome.LogLine log_line = 2;
+    common.HttpActionResponseHead http_response_head = 3;
+    bytes http_response_body = 4;
+    RunResult result = 5;
+    Overloaded overloaded = 6;
+  }
+}
+
+// Sent once the isolate has accepted the request (isolate function_started
+// signal). After this, actions are never retried.
+message Started {}
+message Overloaded { string reason = 1; }
+
+message RunRequest {
+  string instance_name = 1;
+  common.UdfType udf_type = 2;
+  convex_identity.UncheckedIdentity identity = 3;
+  uint64 ts = 4; // RepeatableTimestamp chosen by the conductor
+  Writes existing_writes = 5;
+  optional common.ValidatedPathAndArgs path_and_args = 6;
+  optional convex_query_journal.QueryJournal journal = 7;
+  optional HttpActionMetadata http = 8;
+  map<string, string> default_system_env_vars = 9;
+  repeated InMemoryIndexLastModified in_memory_index_last_modified = 10;
+  common.ExecutionContext context = 11;
+  BootstrapMetadata bootstrap_metadata = 12;
+  // Absent when the conductor has no table counts (TableCountSnapshot = None).
+  optional TableCounts table_counts = 13;
+  DeploymentMetadata deployment = 14;
+  string convex_origin = 15;
+  bool subfunctions_in_same_isolate = 16;
+  // StorageType::S3 prefix of the deployment; workers read modules and files
+  // under it.
+  string s3_prefix = 17;
+}
+
+message HttpActionMetadata {
+  common.ValidatedHttpPath http_module_path = 1;
+  string routed_path = 2;
+  common.HttpActionRequestHead head = 3;
+  bool has_body = 4;
+}
+
+message IndexRef {
+  bytes index_id = 1;
+  optional uint32 persistence_index_id = 2;
+}
+
+message BootstrapMetadata {
+  IndexRef tables_by_id = 1;
+  IndexRef index_by_id = 2;
+  bytes tables_tablet_id = 3;
+  bytes index_tablet_id = 4;
+}
+
+message InMemoryIndexLastModified {
+  bytes index_id = 1;
+  uint64 last_modified = 2;
+}
+
+message TableCount {
+  bytes tablet_id = 1;
+  uint64 count = 2;
+}
+
+message TableCounts {
+  repeated TableCount tables = 1;
+}
+
+message DeploymentMetadata {
+  string name = 1;
+  optional string region = 2;
+  string class = 3;
+}
+
+message RunResult {
+  optional FunctionFinalTransaction transaction = 1;
+  outcome.FunctionOutcome outcome = 2;
+  usage.FunctionUsageStats usage = 3;
+}
+
+message FunctionFinalTransaction {
+  uint64 begin_timestamp = 1;
+  FunctionReads reads = 2;
+  Writes writes = 3;
+  repeated TabletRows rows_read_by_tablet = 4;
+}
+
+message TabletRows {
+  bytes tablet_id = 1;
+  uint64 rows = 2;
+}
+
+message FunctionReads {
+  ReadSet reads = 1;
+  uint64 num_intervals = 2;
+  ReadSize user_tx_size = 3;
+  ReadSize system_tx_size = 4;
+}
+
+message ReadSize {
+  uint64 total_document_size = 1;
+  uint64 total_document_count = 2;
+}
+
+message TabletIndexName {
+  bytes tablet_id = 1;
+  string descriptor = 2;
+}
+
+message ReadSet {
+  repeated IndexReads indexed = 1;
+  repeated SearchReads search = 2;
+}
+
+message IndexReads {
+  TabletIndexName index = 1;
+  repeated common.FieldPath fields = 2;
+  repeated common.Interval intervals = 3;
+}
+
+message SearchReads {
+  TabletIndexName index = 1;
+  QueryReads reads = 2;
+}
+
+// Mirrors search::query::QueryReads' public constructor inputs.
+message QueryReads {
+  repeated TextQueryTermRead text_queries = 1;
+  repeated FilterConditionRead filter_conditions = 2;
+}
+
+message TextQueryTermRead {
+  common.FieldPath field_path = 1;
+  oneof term {
+    string exact = 2;
+    string prefix = 3;
+  }
+}
+
+message FilterConditionRead {
+  common.FieldPath field_path = 1;
+  optional bytes filter_value = 2; // FilterValue bytes as-is
+}
+
+message Writes {
+  repeated common.PendingDocumentUpdate updates = 1;
+}
+
+message WatchLoadRequest {}
+
+message LoadReport {
+  double effective_load = 1;
+  uint32 in_flight = 2;
+  // funrun_proto::FUNRUN_PROTOCOL_VERSION of the worker.
+  uint32 protocol_version = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Served by the conductor (function_host crate).
+service FunctionHost {
+  rpc IndexPage(IndexPageRequest) returns (IndexPageResponse);
+  rpc TextSearch(TextSearchRequest) returns (TextSearchResponse);
+  rpc ActionCallback(ActionCallbackRequest) returns (ActionCallbackResponse);
+}
+
+message IndexPageRequest {
+  uint64 ts = 1;
+  IndexRef index = 2;
+  bytes tablet_id = 3;
+  repeated common.Interval interval = 4; // at most one element; none = empty
+  common.Order order = 5;
+  uint64 max_results = 6;
+}
+
+message IndexEntry {
+  bytes key = 1;
+  uint64 ts = 2;
+  common.ResolvedDocument value = 3;
+}
+
+message IndexPageResponse {
+  repeated IndexEntry entries = 1;
+  // Absent = CursorPosition::End.
+  optional bytes cursor_after = 2;
+}
+
+message TextSearchRequest {
+  uint64 ts = 1;
+  bytes index_id = 2; // the conductor resolves the Index itself
+  InternalSearch search = 3;
+  SearchVersion version = 4;
+  repeated common.DocumentUpdate pending_updates = 5;
+}
+
+// Mirrors common::query::InternalSearch (no serde impl upstream).
+message InternalSearch {
+  TabletIndexName index_name = 1;
+  string table_name = 2;
+  repeated InternalSearchFilter filters = 3;
+}
+
+message InternalSearchFilter {
+  common.FieldPath field_path = 1;
+  oneof filter {
+    string search = 2;
+    bytes eq = 3; // FilterValue bytes as-is
+  }
+}
+
+enum SearchVersion {
+  // proto3 default: an unset version is rejected, never read as V1.
+  SEARCH_VERSION_UNSPECIFIED = 0;
+  SEARCH_VERSION_V1 = 1;
+  SEARCH_VERSION_V2 = 2;
+}
+
+message CandidateRevisionWithKey {
+  searchlight.CandidateRevision revision = 1;
+  bytes index_key = 2;
+}
+
+message TextSearchResponse {
+  repeated CandidateRevisionWithKey revisions_with_keys = 1;
+  QueryReads reads = 2;
+  uint64 filtered_bytes_searched = 3;
+}
+
+message ComponentFunctionPath {
+  string component = 1; // ComponentPath string form, "" = root
+  string udf_path = 2;
+}
+
+message ActionCallbackRequest {
+  convex_identity.UncheckedIdentity identity = 1;
+  oneof call {
+    ExecuteUdf execute_query = 2;
+    ExecuteUdf execute_mutation = 3;
+    ExecuteUdf execute_action = 4;
+    StorageRef storage_get_url = 5;
+    StorageRef storage_delete = 6;
+    StorageRef storage_get_file_entry = 7;
+    StoreFileEntry storage_store_file_entry = 8;
+    ScheduleJob schedule_job = 9;
+    string cancel_job = 10;             // DeveloperDocumentId encoded string
+    string vector_search_json = 11;     // JsonValue
+    string lookup_function_handle = 12; // FunctionHandle string
+    ComponentFunctionPath create_function_handle = 13;
+    AttributedCaller create_ai_gateway_token = 14;
+  }
+}
+
+message ExecuteUdf {
+  ComponentFunctionPath path = 1;
+  string args_json = 2; // SerializedArgs
+  common.ExecutionContext context = 3;
+}
+
+message StorageRef {
+  optional string component_id = 1; // None = root component
+  storage.FileStorageId storage_id = 2;
+}
+
+message StoreFileEntry {
+  optional string component_id = 1;
+  storage.FileStorageEntry entry = 2;
+}
+
+message ScheduleJob {
+  optional string scheduling_component_id = 1;
+  ComponentFunctionPath scheduled_path = 2;
+  string args_json = 3;
+  uint64 scheduled_ts_nanos = 4;
+  common.ExecutionContext context = 5;
+}
+
+// Mirrors common::types::AttributedCaller.
+message AttributedCaller {
+  string component_path = 1; // ComponentPath string form, "" = root
+  oneof caller {
+    string action_udf_path = 2;
+    HttpActionRoute http_action_route = 3;
+  }
+}
+
+message HttpActionRoute {
+  string method = 1;
+  string path = 2;
+  bool matched = 3;
+}
+
+// One variant per ActionCallbacks method, same order as the request.
+message ActionCallbackResponse {
+  // Was the untyped `function_result` before replies became one per method.
+  reserved 1;
+  oneof result {
+    common.FunctionResult execute_query = 2;
+    common.FunctionResult execute_mutation = 3;
+    common.FunctionResult execute_action = 4;
+    OptionalString storage_get_url = 5;
+    Unit storage_delete = 6;
+    OptionalFileEntry storage_get_file_entry = 7;
+    StoredFile storage_store_file_entry = 8;
+    string schedule_job = 9;            // DeveloperDocumentId encoded string
+    Unit cancel_job = 10;
+    VectorSearchResults vector_search = 11;
+    ComponentFunctionPath lookup_function_handle = 12;
+    string create_function_handle = 13; // FunctionHandle string
+    string create_ai_gateway_token = 14;
+  }
+}
+
+message OptionalString {
+  optional string value = 1;
+}
+
+// Option<(ComponentPath, FileStorageEntry)>: `entry` unset = None.
+message OptionalFileEntry {
+  FileEntry entry = 1;
+}
+
+message FileEntry {
+  string component_path = 1; // ComponentPath string form, "" = root
+  storage.FileStorageEntry entry = 2;
+}
+
+message StoredFile {
+  string component_path = 1;
+  string document_id = 2; // DeveloperDocumentId encoded string
+}
+
+message VectorSearchResults {
+  repeated VectorSearchResult results = 1;
+  usage.FunctionUsageStats usage = 2;
+}
+
+message VectorSearchResult {
+  float score = 1;
+  string id = 2; // DeveloperDocumentId encoded string
+}
+
+message Unit {}

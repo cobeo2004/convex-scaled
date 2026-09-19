@@ -1,0 +1,107 @@
+name: funrun upstream sync
+
+# Weekly early-warning signal: rebase the fork branch onto upstream main and
+# run the fork's crate tests + e2e equivalence suite. A failed rebase or test
+# means upstream changed FunctionRunner / RunRequestArgs / local_backend
+# wiring in a way this fork hasn't absorbed yet.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+# Read-only: this job never pushes the rebase result anywhere, it only
+# reports pass/fail as the signal.
+permissions:
+  contents: read
+
+jobs:
+  rebase-and-test:
+    name: Rebase onto upstream and test
+    runs-on: ubuntu-latest
+    # cargo test / the Dockerfile build both compile V8 (the `isolate` crate)
+    # from scratch on every run (no cross-run cache, see below), so this
+    # needs real headroom.
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout feat/remote-function-runner
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          ref: feat/remote-function-runner
+          persist-credentials: false
+
+      - name: Rebase onto upstream main
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git config user.name "funrun-bot"
+          git config user.email "funrun-bot@users.noreply.github.com"
+          git remote add upstream https://github.com/get-convex/convex-backend.git
+          git fetch upstream main
+          # --no-edit avoids waiting on an editor; on conflict, abort cleanly
+          # and fail the job loudly instead of leaving a half-rebased tree or
+          # hanging on input. A failed rebase IS the signal this job exists
+          # to raise.
+          git rebase --no-edit upstream/main || { git rebase --abort; exit 1; }
+
+      # Reads channel + targets from ./rust-toolchain (the repo has no
+      # rust-toolchain.toml). Runs after the rebase so an upstream toolchain
+      # bump is what gets installed and tested, same signal as the rest of
+      # this job. Same action pin as .github/actions/setup-rust.
+      - name: Setup Rust
+        uses: dsherret/rust-toolchain-file@3551321aa44dd44a0393eb3b6bdfbc5d25ecf621 # v1
+
+      # .github/actions/setup-rust can't be reused as-is: it requires R2/AWS
+      # secrets for sccache/rust-cache that this least-privilege, no-secrets
+      # job doesn't take. This mirrors just its Linux system-library steps.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake libclang-dev libstdc++6 \
+            libssl-dev libsodium-dev librocksdb-dev libsnappy-dev
+
+      - name: Export native library env vars
+        run: |
+          {
+            echo "SODIUM_USE_PKG_CONFIG=1"
+            echo "ROCKSDB_LIB_DIR=/usr/lib"
+            echo "SNAPPY_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu"
+          } >> "$GITHUB_ENV"
+
+      # Node (from .nvmrc) for the e2e suite's npx/vitest, and protoc (pinned
+      # in mise.toml) for pb_funrun/funrun_proto's build.rs. Same pin as
+      # existing workflows.
+      - name: Install mise tools
+        uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          cache: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # mise doesn't install pnpm; without it run.sh falls back to npm and
+      # ignores the e2e pnpm-lock.yaml. Pin matches npm-packages/package.json.
+      - name: Install pnpm
+        run: npm install -g pnpm@11.15.1
+
+      - name: Unit tests for fork crates
+        run:
+          cargo test -p pb_funrun -p funrun_proto -p function_host -p
+          funrun_worker -p remote_function_runner
+
+      # BUILD=1 is required: a fresh runner has no pre-built conductor/worker
+      # image for run.sh to reuse. This is a full release build of the
+      # backend + funrun_worker (V8 included) with no cache surviving across
+      # weekly runs (ephemeral runner disk; the Dockerfile's
+      # --mount=type=cache layers only help re-invocations within one build).
+      # Trade-off accepted for simplicity: a registry/GHA Buildx cache would
+      # cut this down but adds real setup+maintenance; the 180min budget has
+      # headroom instead. Revisit if runs start timing out.
+      - name: E2E equivalence
+        run: BUILD=1 ./self-hosted/funrun/e2e/run.sh
+
+      # Failure injection (worker kill, no re-run, drain, rolling restart, no
+      # workers, bad token). Cheap to include: reuses the images run.sh just
+      # built above (same Docker daemon), no BUILD=1 needed here.
+      - name: Failure injection
+        run: ./self-hosted/funrun/e2e/failures.sh

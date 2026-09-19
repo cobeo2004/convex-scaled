@@ -65,7 +65,9 @@ exports = { workspace = true }
 fastrace = { workspace = true }
 file_storage = { workspace = true }
 fivetran_destination = { workspace = true }
+function_host = { workspace = true }
 function_runner = { workspace = true }
+funrun_proto = { workspace = true }
 futures = { workspace = true }
 futures-async-stream = { workspace = true }
 governor = { workspace = true }
@@ -81,6 +83,7 @@ model = { workspace = true }
 moka = { workspace = true }
 node_executor = { workspace = true }
 parking_lot = { workspace = true }
+remote_function_runner = { workspace = true }
 reqwest = { workspace = true }
 roles = { workspace = true }
 runtime = { workspace = true }

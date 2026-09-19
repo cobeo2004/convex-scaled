@@ -1,0 +1,55 @@
+[package]
+name = "funrun_worker"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-FSL-1.1-Apache-2.0"
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "funrun_worker"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+aws_s3 = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+cmd_util = { workspace = true }
+common = { workspace = true }
+database = { workspace = true }
+errors = { workspace = true }
+function_runner = { workspace = true }
+funrun_proto = { workspace = true }
+futures = { workspace = true }
+indexing = { workspace = true }
+isolate = { workspace = true }
+keybroker = { workspace = true }
+metrics = { workspace = true }
+model = { workspace = true }
+pb = { workspace = true }
+pb_funrun = { workspace = true }
+performance_stats = { workspace = true }
+reqwest = { workspace = true }
+runtime = { workspace = true }
+search = { workspace = true }
+serde_json = { workspace = true }
+storage = { workspace = true }
+sync_types = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+udf = { workspace = true }
+url = { workspace = true }
+usage_tracking = { workspace = true }
+value = { workspace = true }
+vector = { workspace = true }
+
+[dev-dependencies]
+function_host = { workspace = true }
+
+[lints]
+workspace = true

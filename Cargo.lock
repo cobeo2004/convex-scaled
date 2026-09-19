@@ -4079,6 +4079,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a597f730845c4bd1d4ef892ae898bbcf867375d72f43e50f285e07e59c4f589"
 
 [[package]]
+name = "function_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "common",
+ "convex_sync_types",
+ "database",
+ "errors",
+ "funrun_proto",
+ "indexing",
+ "keybroker",
+ "model",
+ "parking_lot",
+ "pb",
+ "pb_funrun",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "udf",
+ "usage_tracking",
+ "value",
+ "vector",
+]
+
+[[package]]
 name = "function_runner"
 version = "0.1.0"
 dependencies = [
@@ -4110,6 +4136,76 @@ dependencies = [
  "udf",
  "usage_tracking",
  "value",
+]
+
+[[package]]
+name = "funrun_proto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.13.1",
+ "common",
+ "convex_sync_types",
+ "database",
+ "function_runner",
+ "http 1.5.0",
+ "indexing",
+ "keybroker",
+ "model",
+ "pb",
+ "pb_funrun",
+ "prost 0.14.3",
+ "search",
+ "serde_json",
+ "tonic",
+ "tracing",
+ "udf",
+ "usage_tracking",
+ "value",
+ "vector",
+]
+
+[[package]]
+name = "funrun_worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws_s3",
+ "bytes",
+ "clap",
+ "cmd_util",
+ "common",
+ "convex_sync_types",
+ "database",
+ "errors",
+ "function_host",
+ "function_runner",
+ "funrun_proto",
+ "futures",
+ "indexing",
+ "isolate",
+ "keybroker",
+ "metrics",
+ "model",
+ "pb",
+ "pb_funrun",
+ "performance_stats",
+ "reqwest",
+ "runtime",
+ "search",
+ "serde_json",
+ "storage",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "udf",
+ "url",
+ "usage_tracking",
+ "value",
+ "vector",
 ]
 
 [[package]]
@@ -6000,7 +6096,9 @@ dependencies = [
  "fastrace",
  "file_storage",
  "fivetran_destination",
+ "function_host",
  "function_runner",
+ "funrun_proto",
  "futures",
  "futures-async-stream",
  "governor",
@@ -6018,6 +6116,7 @@ dependencies = [
  "node_executor",
  "parking_lot",
  "proptest",
+ "remote_function_runner",
  "reqwest",
  "roles",
  "runtime",
@@ -7370,6 +7469,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pb_funrun"
+version = "0.1.0"
+dependencies = [
+ "pb",
+ "pb_build",
+ "pb_extras",
+ "prost 0.14.3",
+ "prost-reflect",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8483,6 +8595,36 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "remote_function_runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap",
+ "common",
+ "convex_sync_types",
+ "database",
+ "errors",
+ "function_runner",
+ "funrun_proto",
+ "futures",
+ "keybroker",
+ "model",
+ "parking_lot",
+ "pb",
+ "pb_funrun",
+ "rand 0.9.4",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "udf",
+ "usage_tracking",
+ "value",
+]
 
 [[package]]
 name = "reqwest"
