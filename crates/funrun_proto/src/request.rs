@@ -280,7 +280,10 @@ pub fn run_request_from_proto(
             );
         },
         UdfType::HttpAction => {
-            anyhow::ensure!(http.is_some(), "HttpAction requires http metadata");
+            anyhow::ensure!(
+                http.is_some() && function_metadata.is_none(),
+                "HttpAction requires http metadata and no function metadata"
+            );
         },
     }
     anyhow::ensure!(!proto.s3_prefix.is_empty(), "missing s3_prefix");
@@ -352,6 +355,17 @@ mod tests {
         proto.udf_type = pb::common::UdfType::Mutation as i32;
         let err = run_request_from_proto(proto).err().unwrap();
         assert!(err.to_string().contains("no http metadata"), "{err}");
+    }
+
+    #[test]
+    fn function_metadata_on_http_action_is_an_error() {
+        let mut proto =
+            run_request_to_proto(&crate::test_samples::sample_http_run_request_parts()).unwrap();
+        let function = run_request_to_proto(&sample()).unwrap();
+        proto.path_and_args = function.path_and_args;
+        proto.journal = function.journal;
+        let err = run_request_from_proto(proto).err().unwrap();
+        assert!(err.to_string().contains("no function metadata"), "{err}");
     }
 
     #[test]
