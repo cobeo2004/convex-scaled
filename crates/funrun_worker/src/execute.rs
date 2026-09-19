@@ -41,6 +41,7 @@ use funrun_proto::{
     http::response_part_to_down,
     request::run_request_from_proto,
     transaction::run_result_to_proto,
+    FUNRUN_PROTOCOL_VERSION,
 };
 use futures::{
     stream::BoxStream,
@@ -436,6 +437,7 @@ impl Funrun for FunrunService {
                         &targets,
                     ),
                     in_flight: u32::try_from(in_flight).unwrap_or(u32::MAX),
+                    protocol_version: FUNRUN_PROTOCOL_VERSION,
                 };
                 if tx.send(Ok(report)).await.is_err() {
                     return;

@@ -188,6 +188,8 @@ message WatchLoadRequest {}
 message LoadReport {
   double effective_load = 1;
   uint32 in_flight = 2;
+  // funrun_proto::FUNRUN_PROTOCOL_VERSION of the worker.
+  uint32 protocol_version = 3;
 }
 
 // ---------------------------------------------------------------------------

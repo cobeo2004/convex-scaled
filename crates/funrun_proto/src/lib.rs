@@ -3,6 +3,13 @@ use std::{
     fmt::Debug,
 };
 
+/// Version of the funrun wire protocol: `funrun.proto` and the `pb::common`
+/// / `pb::storage` messages it embeds. Bump it on any change to them. prost
+/// drops unknown fields, so mixed builds would otherwise lose data silently
+/// (e.g. read-set intervals) instead of failing. Workers report it in
+/// `LoadReport` and send it as `x-funrun-protocol` on `FunctionHost` calls.
+pub const FUNRUN_PROTOCOL_VERSION: u32 = 1;
+
 pub mod auth;
 pub mod callbacks;
 pub mod http;

@@ -9,8 +9,11 @@ use tonic::{
     Status,
 };
 
+use crate::FUNRUN_PROTOCOL_VERSION;
+
 pub const AUTHORIZATION: &str = "authorization";
 pub const MODULE_HEADER: &str = "x-convex-module";
+pub const PROTOCOL_HEADER: &str = "x-funrun-protocol";
 
 /// Bearer token for conductor -> worker calls (`Execute`, `WatchLoad`).
 pub fn worker_token(instance_secret: &str) -> String {
@@ -49,6 +52,21 @@ fn verify_bearer(metadata: &MetadataMap, expected: &str) -> Result<(), Status> {
         .map_err(|_| Status::unauthenticated("invalid funrun bearer token"))
 }
 
+/// Rejects a peer built with another `FUNRUN_PROTOCOL_VERSION`.
+pub fn check_protocol(metadata: &MetadataMap) -> Result<(), Status> {
+    let presented = metadata.get(PROTOCOL_HEADER).and_then(|v| v.to_str().ok());
+    if presented == Some(FUNRUN_PROTOCOL_VERSION.to_string().as_str()) {
+        return Ok(());
+    }
+    let status = Status::failed_precondition(format!(
+        "funrun protocol version mismatch: peer sent {presented:?}, this build speaks \
+         {FUNRUN_PROTOCOL_VERSION}; run the same build on conductor and workers"
+    ));
+    tracing::error!("{}", status.message());
+    Err(status)
+}
+
+/// Adds the bearer token and `x-funrun-protocol` to every call.
 #[derive(Clone)]
 pub struct BearerInterceptor {
     pub token: String,
@@ -60,6 +78,9 @@ impl Interceptor for BearerInterceptor {
             .parse()
             .map_err(|_| Status::internal("bad funrun token"))?;
         request.metadata_mut().insert(AUTHORIZATION, value);
+        request
+            .metadata_mut()
+            .insert(PROTOCOL_HEADER, FUNRUN_PROTOCOL_VERSION.into());
         Ok(request)
     }
 }
@@ -161,6 +182,7 @@ mod tests {
         };
         let req =
             tonic::service::Interceptor::call(&mut interceptor, tonic::Request::new(())).unwrap();
+        check_protocol(req.metadata()).unwrap();
         check_bearer(req.metadata(), &worker_token("s")).unwrap();
     }
 }

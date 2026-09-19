@@ -21,10 +21,14 @@ use common::{
         SpawnHandle,
     },
 };
-use funrun_proto::auth::BearerInterceptor;
+use funrun_proto::{
+    auth::BearerInterceptor,
+    FUNRUN_PROTOCOL_VERSION,
+};
 use parking_lot::Mutex;
 use pb_funrun::funrun::{
     funrun_client::FunrunClient,
+    LoadReport,
     WatchLoadRequest,
 };
 use tonic::{
@@ -209,6 +213,13 @@ impl WorkerPool {
                     loop {
                         match reports.message().await {
                             Ok(Some(report)) => {
+                                if let Err(e) = check_protocol_version(&report) {
+                                    // Backs off like a rejected call, which
+                                    // rate-limits this log line.
+                                    tracing::error!("funrun worker {addr} unusable: {e:#}");
+                                    delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+                                    break;
+                                }
                                 delay = RECONNECT_DELAY;
                                 self.update(&addr, |s| {
                                     s.load = report.effective_load;
@@ -256,6 +267,18 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// A worker from another build may silently drop fields it doesn't know, so
+/// it never gets work.
+fn check_protocol_version(report: &LoadReport) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        report.protocol_version == FUNRUN_PROTOCOL_VERSION,
+        "worker speaks funrun protocol version {}, this conductor {FUNRUN_PROTOCOL_VERSION}; run \
+         the same build on conductor and workers",
+        report.protocol_version
+    );
+    Ok(())
+}
+
 /// Reconnects quickly after a lost connection, but backs off exponentially
 /// when the worker keeps rejecting the call (e.g. a wrong token).
 fn reconnect_delay(delay: Duration, status: &tonic::Status) -> Duration {
@@ -289,9 +312,12 @@ pub(crate) fn connect_for_test(addr: &str) -> FunrunChannel {
 mod tests {
     use std::time::Duration;
 
+    use funrun_proto::FUNRUN_PROTOCOL_VERSION;
+    use pb_funrun::funrun::LoadReport;
     use tonic::Status;
 
     use super::{
+        check_protocol_version,
         reconnect_delay,
         MAX_RECONNECT_DELAY,
         RECONNECT_DELAY,
@@ -308,6 +334,20 @@ mod tests {
         }
         assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30]);
         assert_eq!(MAX_RECONNECT_DELAY, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn report_from_another_protocol_version_is_rejected() {
+        let report = |protocol_version| LoadReport {
+            effective_load: 0.0,
+            in_flight: 0,
+            protocol_version,
+        };
+        check_protocol_version(&report(FUNRUN_PROTOCOL_VERSION)).unwrap();
+        let err = check_protocol_version(&report(FUNRUN_PROTOCOL_VERSION + 1)).unwrap_err();
+        assert!(format!("{err:#}").contains("protocol version"), "{err:#}");
+        // A worker from before the field existed reports 0.
+        check_protocol_version(&report(0)).unwrap_err();
     }
 
     #[test]

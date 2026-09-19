@@ -154,5 +154,9 @@ fn watch_load_emits_reports() {
         let report = stream.message().await.unwrap().unwrap();
         assert!((0.0..=1.0).contains(&report.effective_load));
         assert_eq!(report.in_flight, 0);
+        assert_eq!(
+            report.protocol_version,
+            funrun_proto::FUNRUN_PROTOCOL_VERSION
+        );
     });
 }

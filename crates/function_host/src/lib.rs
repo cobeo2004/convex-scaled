@@ -24,7 +24,10 @@ use common::{
 };
 use database::TransactionTextSnapshot;
 use funrun_proto::{
-    auth::check_bearer,
+    auth::{
+        check_bearer,
+        check_protocol,
+    },
     callbacks::{
         callback_reply_to_proto,
         callback_request_from_proto,
@@ -249,6 +252,7 @@ impl FunctionHostService for FunctionHost {
         req: Request<IndexPageRequest>,
     ) -> Result<Response<IndexPageResponse>, Status> {
         check_bearer(req.metadata(), &self.token)?;
+        check_protocol(req.metadata())?;
         self.index_page(req.into_inner())
             .await
             .map(Response::new)
@@ -260,6 +264,7 @@ impl FunctionHostService for FunctionHost {
         req: Request<TextSearchRequest>,
     ) -> Result<Response<TextSearchResponse>, Status> {
         check_bearer(req.metadata(), &self.token)?;
+        check_protocol(req.metadata())?;
         self.text_search(req.into_inner())
             .await
             .map(Response::new)
@@ -271,6 +276,7 @@ impl FunctionHostService for FunctionHost {
         req: Request<ActionCallbackRequest>,
     ) -> Result<Response<ActionCallbackResponse>, Status> {
         check_bearer(req.metadata(), &self.token)?;
+        check_protocol(req.metadata())?;
         let cb = self
             .action_callbacks
             .read()
@@ -335,6 +341,8 @@ mod tests {
             host_token,
             worker_token,
             BearerInterceptor,
+            AUTHORIZATION,
+            PROTOCOL_HEADER,
         },
         callbacks::{
             callback_request_to_proto,
@@ -672,6 +680,28 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn worker_with_another_protocol_version_is_rejected() {
+        let t = start_host().await;
+        let channel = Channel::from_shared(format!("http://{}", t.addr))
+            .unwrap()
+            .connect_lazy();
+        let token = format!("Bearer {}", host_token("secret"));
+        let mut client =
+            FunctionHostClient::with_interceptor(channel, move |mut req: Request<()>| {
+                req.metadata_mut()
+                    .insert(AUTHORIZATION, token.parse().unwrap());
+                req.metadata_mut()
+                    .insert(PROTOCOL_HEADER, "999".parse().unwrap());
+                Ok(req)
+            });
+        let err = client
+            .index_page(sample_index_page_request())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
     #[tokio::test]
