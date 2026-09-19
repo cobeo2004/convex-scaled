@@ -7,7 +7,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 use aws_s3::storage::S3Storage;
 use common::{
-    knobs::BACKEND_REQUEST_DRAIN_TIMEOUT,
+    knobs::{
+        BACKEND_REQUEST_DRAIN_TIMEOUT,
+        MAX_ISOLATE_WORKERS,
+    },
     runtime::{
         tokio_spawn,
         Runtime,
@@ -36,7 +39,10 @@ use tokio::{
 };
 
 use crate::{
-    config::WorkerConfig,
+    config::{
+        WorkerConfig,
+        WorkerKind,
+    },
     execute::FunrunService,
     host_client::connect_host,
 };
@@ -121,6 +127,11 @@ pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result
         &config.instance_name,
         &config.instance_secret,
         config.convex_http_proxy.clone(),
+        config.kind,
+        match config.kind {
+            WorkerKind::Isolate => *MAX_ISOLATE_WORKERS,
+            WorkerKind::Node => config.node_max_concurrent,
+        },
     )?;
     let mut sigterm = signal(SignalKind::terminate())?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

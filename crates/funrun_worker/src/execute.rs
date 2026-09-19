@@ -27,7 +27,6 @@ use common::{
         FUNRUN_ISOLATE_ACTIVE_THREADS,
         MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE,
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
-        MAX_ISOLATE_WORKERS,
     },
     log_lines::LogLine,
     runtime::tokio_spawn,
@@ -42,6 +41,10 @@ use funrun_proto::{
     auth::{
         check_bearer,
         check_protocol,
+    },
+    deploy::{
+        DeployCall,
+        DeployReturn,
     },
     http::response_part_to_down,
     request::run_request_from_proto,
@@ -64,6 +67,7 @@ use keybroker::{
 };
 use pb::error_metadata::ErrorMetadataStatusExt;
 use pb_funrun::funrun::{
+    deploy_result,
     execute_down::Inner as Down,
     execute_up::Inner as Up,
     funrun_server::{
@@ -71,6 +75,8 @@ use pb_funrun::funrun::{
         FunrunServer,
     },
     BodyChunk,
+    DeployRequest,
+    DeployResult,
     ExecuteDown,
     ExecuteUp,
     LoadReport,
@@ -98,6 +104,7 @@ use udf::{
 };
 
 use crate::{
+    config::WorkerKind,
     host_client::{
         EagerTableCounts,
         HostChannel,
@@ -130,6 +137,9 @@ pub struct FunrunService {
     fetch_client: Arc<dyn FetchClient>,
     instance_name: String,
     token: String,
+    kind: WorkerKind,
+    /// Most `Execute` streams in flight at once.
+    capacity: usize,
     in_flight: Arc<AtomicUsize>,
     draining: Arc<watch::Sender<bool>>,
 }
@@ -142,6 +152,8 @@ impl FunrunService {
         instance_name: &str,
         instance_secret: &str,
         convex_http_proxy: Option<url::Url>,
+        kind: WorkerKind,
+        capacity: usize,
     ) -> anyhow::Result<Self> {
         let key_broker =
             KeyBroker::new(instance_name, DeploymentSecret::try_from(instance_secret)?)?
@@ -176,6 +188,8 @@ impl FunrunService {
             fetch_client,
             instance_name: instance_name.to_string(),
             token: funrun_proto::auth::worker_token(instance_secret),
+            kind,
+            capacity,
             in_flight: Arc::new(AtomicUsize::new(0)),
             draining: Arc::new(watch::Sender::new(false)),
         })
@@ -220,18 +234,151 @@ impl FunrunService {
             .map_err(|_| {
                 Status::deadline_exceeded("no RunRequest within the first-frame timeout")
             })??;
-        let Some(ExecuteUp {
-            inner: Some(Up::Request(request)),
-        }) = first
-        else {
+        let Some(ExecuteUp { inner: Some(first) }) = first else {
             return Err(Status::invalid_argument(
-                "first Execute frame must be a RunRequest",
+                "Execute stream had no first frame",
             ));
         };
-        let Some(_in_flight) = InFlightGuard::try_acquire(&self.in_flight, *MAX_ISOLATE_WORKERS)
-        else {
-            let reason = format!("{} functions already in flight", *MAX_ISOLATE_WORKERS);
-            return send(tx, Down::Overloaded(Overloaded { reason })).await;
+        match (self.kind, first) {
+            (WorkerKind::Isolate, Up::Request(request)) => self.run_request(request, up, tx).await,
+            (WorkerKind::Isolate, Up::Deploy(request)) => self.deploy(request, tx).await,
+            // Task 5 replaces this arm with the Node handler.
+            (WorkerKind::Node, Up::Node(_)) => Err(Status::unimplemented(
+                "node workers are not implemented yet",
+            )),
+            (kind @ WorkerKind::Isolate, other @ Up::Node(_))
+            | (kind @ WorkerKind::Node, other @ (Up::Request(_) | Up::Deploy(_))) => {
+                Err(Status::failed_precondition(format!(
+                    "{kind:?} worker cannot run a {} request",
+                    frame_name(&other)
+                )))
+            },
+            (WorkerKind::Isolate | WorkerKind::Node, Up::HttpRequestBody(_)) => Err(
+                Status::invalid_argument("first Execute frame must be a request"),
+            ),
+        }
+    }
+
+    /// `None` when the worker is full; the caller answers `Overloaded`.
+    fn try_acquire(&self) -> Option<InFlightGuard> {
+        InFlightGuard::try_acquire(&self.in_flight, self.capacity)
+    }
+
+    async fn overloaded(&self, tx: &DownSender) -> Result<(), Status> {
+        let reason = format!("{} requests already in flight", self.capacity);
+        send(tx, Down::Overloaded(Overloaded { reason })).await
+    }
+
+    /// Deploy-time evaluation: no storage or host, just the isolate.
+    async fn deploy(&self, request: DeployRequest, tx: &DownSender) -> Result<(), Status> {
+        let Some(_in_flight) = self.try_acquire() else {
+            return self.overloaded(tx).await;
+        };
+        let call = DeployCall::try_from(request)
+            .map_err(|e| Status::invalid_argument(format!("invalid DeployRequest: {e:#}")))?;
+        send(tx, Down::Started(Started {})).await?;
+        let name = self.instance_name.clone();
+        let result = match call {
+            DeployCall::Analyze {
+                udf_config,
+                modules,
+                environment_variables,
+            } => self
+                .core
+                .analyze(udf_config, modules, environment_variables, name)
+                .await
+                .map(|r| r.map(DeployReturn::Analyze)),
+            DeployCall::AppDefinitions {
+                app_definition,
+                component_definitions,
+                dependency_graph,
+                user_environment_variables,
+                system_env_vars,
+            } => self
+                .core
+                .evaluate_app_definitions(
+                    app_definition,
+                    component_definitions,
+                    dependency_graph,
+                    user_environment_variables,
+                    system_env_vars,
+                    name,
+                )
+                .await
+                .map(|r| Ok(DeployReturn::AppDefinitions(r))),
+            DeployCall::ComponentInitializer {
+                evaluated_definitions,
+                path,
+                definition,
+                args,
+                name: component_name,
+            } => self
+                .core
+                .evaluate_component_initializer(
+                    evaluated_definitions,
+                    path,
+                    definition,
+                    args,
+                    component_name,
+                    name,
+                )
+                .await
+                .map(|r| Ok(DeployReturn::ComponentInitializer(r))),
+            DeployCall::Schema {
+                bundle,
+                source_map,
+                rng_seed,
+                unix_timestamp,
+            } => self
+                .core
+                .evaluate_schema(bundle, source_map, rng_seed, unix_timestamp, name)
+                .await
+                .map(|s| Ok(DeployReturn::Schema(s))),
+            DeployCall::AuthConfig {
+                bundle,
+                source_map,
+                environment_variables,
+                explanation,
+            } => self
+                .core
+                .evaluate_auth_config(
+                    bundle,
+                    source_map,
+                    environment_variables,
+                    &explanation,
+                    name,
+                )
+                .await
+                .map(|c| Ok(DeployReturn::AuthConfig(c))),
+        };
+        let result = match result {
+            Ok(Ok(ret)) => {
+                deploy_result::Result::Json(Vec::try_from(ret).map_err(Status::from_anyhow)?)
+            },
+            Ok(Err(js)) => {
+                deploy_result::Result::JsError(js.try_into().map_err(Status::from_anyhow)?)
+            },
+            // After `Started`, so the conductor counts an `Overloaded` here
+            // as a lost call; user errors keep their `ErrorMetadata`.
+            Err(e) => return send(tx, run_error_to_down(e)?).await,
+        };
+        send(
+            tx,
+            Down::DeployResult(DeployResult {
+                result: Some(result),
+            }),
+        )
+        .await
+    }
+
+    async fn run_request(
+        &self,
+        request: pb_funrun::funrun::RunRequest,
+        up: Streaming<ExecuteUp>,
+        tx: &DownSender,
+    ) -> Result<(), Status> {
+        let Some(_in_flight) = self.try_acquire() else {
+            return self.overloaded(tx).await;
         };
         let parts = run_request_from_proto(request)
             .map_err(|e| Status::invalid_argument(format!("invalid RunRequest: {e:#}")))?;
@@ -373,6 +520,15 @@ fn run_error_to_down(error: anyhow::Error) -> Result<Down, Status> {
     }
 }
 
+fn frame_name(up: &Up) -> &'static str {
+    match up {
+        Up::Request(_) => "RunRequest",
+        Up::HttpRequestBody(_) => "HttpRequestBody",
+        Up::Deploy(_) => "DeployRequest",
+        Up::Node(_) => "NodeRequest",
+    }
+}
+
 /// The key broker signs for `serving`, so a request for another instance
 /// must not run here. Neither name is echoed back.
 fn ensure_same_instance(serving: &str, requested: &str) -> Result<(), Status> {
@@ -466,6 +622,7 @@ impl Funrun for FunrunService {
         check_protocol(request.metadata())?;
         let (tx, rx) = mpsc::channel(1);
         let in_flight = self.in_flight.clone();
+        let capacity = self.capacity;
         let mut draining = self.draining.subscribe();
         tokio_spawn("funrun_watch_load", async move {
             let targets = LoadTargets::from_knobs();
@@ -487,7 +644,7 @@ impl Funrun for FunrunService {
                     effective_load: effective_load(
                         &LoadInputs {
                             in_flight,
-                            max_isolate_workers: *MAX_ISOLATE_WORKERS,
+                            max_isolate_workers: capacity,
                             cpu_util: cpu.util,
                             cpu_psi: cpu.psi,
                         },

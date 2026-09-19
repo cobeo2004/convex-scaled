@@ -1,26 +1,40 @@
 //! Execute/WatchLoad framing and auth over loopback gRPC. Nothing here runs
-//! a function, so the host channel points nowhere and is never dialled.
+//! a user function (deploy-time evaluation needs no host), so the host
+//! channel points nowhere and is never dialled.
 
 use std::{
+    collections::BTreeMap,
     future::Future,
     net::SocketAddr,
     time::Duration,
 };
 
-use funrun_proto::auth::{
-    host_token,
-    worker_token,
-    BearerInterceptor,
+use funrun_proto::{
+    auth::{
+        host_token,
+        worker_token,
+        BearerInterceptor,
+    },
+    deploy::{
+        decode_return,
+        DeployCall,
+        DeployReturn,
+    },
 };
 use funrun_worker::{
+    config::WorkerKind,
     execute::FunrunService,
     host_client::connect_host,
 };
+use model::modules::module_versions::ModuleSource;
 use pb_funrun::funrun::{
+    deploy_result,
+    execute_down,
     execute_up,
     funrun_client::FunrunClient,
     BodyChunk,
     ExecuteUp,
+    NodeRequest,
     RunRequest,
     WatchLoadRequest,
 };
@@ -41,11 +55,19 @@ where
     F: FnOnce(SocketAddr, FunrunService) -> Fut,
     Fut: Future<Output = ()>,
 {
+    with_kind_worker(WorkerKind::Isolate, test)
+}
+
+fn with_kind_worker<F, Fut>(kind: WorkerKind, test: F)
+where
+    F: FnOnce(SocketAddr, FunrunService) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let tokio = ProdRuntime::init_tokio().unwrap();
     let rt = ProdRuntime::new(&tokio);
     rt.clone().block_on("test", async move {
         let host = connect_host("http://127.0.0.1:9", host_token(SECRET)).unwrap();
-        let service = FunrunService::new(rt, host, "carnitas", SECRET, None).unwrap();
+        let service = FunrunService::new(rt, host, "carnitas", SECRET, None, kind, 4).unwrap();
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = socket.local_addr().unwrap();
@@ -208,5 +230,78 @@ fn draining_ends_watch_load_streams() {
             }
         });
         end.await.expect("WatchLoad should end once draining");
+    });
+}
+
+#[test]
+fn isolate_worker_rejects_node_request() {
+    with_worker(|addr, _| async move {
+        let mut client = authed_client(addr).await;
+        let node = ExecuteUp {
+            inner: Some(execute_up::Inner::Node(NodeRequest {
+                executor_request_json: b"{}".to_vec(),
+            })),
+        };
+        let mut down = client
+            .execute(tokio_stream::iter(vec![node]))
+            .await
+            .unwrap()
+            .into_inner();
+        let err = down.message().await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    });
+}
+
+#[test]
+fn node_worker_rejects_deploy_request() {
+    with_kind_worker(WorkerKind::Node, |addr, _| async move {
+        let mut client = authed_client(addr).await;
+        let mut down = client
+            .execute(tokio_stream::iter(vec![auth_config_frame()]))
+            .await
+            .unwrap()
+            .into_inner();
+        let err = down.message().await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    });
+}
+
+fn auth_config_frame() -> ExecuteUp {
+    let call = DeployCall::AuthConfig {
+        bundle: ModuleSource::new("export default { providers: [] };"),
+        source_map: None,
+        environment_variables: BTreeMap::new(),
+        explanation: "test".into(),
+    };
+    ExecuteUp {
+        inner: Some(execute_up::Inner::Deploy(call.try_into().unwrap())),
+    }
+}
+
+#[test]
+fn isolate_worker_evaluates_auth_config() {
+    with_worker(|addr, _| async move {
+        let mut client = authed_client(addr).await;
+        let mut down = client
+            .execute(tokio_stream::iter(vec![auth_config_frame()]))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut frames = vec![];
+        while let Some(frame) = down.message().await.unwrap() {
+            frames.push(frame.inner.unwrap());
+        }
+        let [execute_down::Inner::Started(_), execute_down::Inner::DeployResult(result)] =
+            &frames[..]
+        else {
+            panic!("expected Started then DeployResult, got {frames:?}");
+        };
+        let Some(deploy_result::Result::Json(b)) = &result.result else {
+            panic!("no json result: {result:?}");
+        };
+        assert!(matches!(
+            decode_return(b).unwrap(),
+            DeployReturn::AuthConfig(c) if c.providers.is_empty()
+        ));
     });
 }
