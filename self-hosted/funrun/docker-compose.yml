@@ -92,6 +92,10 @@ services:
       FUNRUN_WORKERS: ${FUNRUN_WORKERS:-worker:7400}
       FUNRUN_ROUTING: ${FUNRUN_ROUTING:-direct}
       FUNCTION_HOST_LISTEN: ${FUNCTION_HOST_LISTEN:-0.0.0.0:7401}
+      FUNRUN_NODE_WORKERS: ${FUNRUN_NODE_WORKERS:-}
+      FUNRUN_FALLBACK: ${FUNRUN_FALLBACK:-fail}
+      FUNRUN_NODE_CALLBACK_ORIGIN: ${FUNRUN_NODE_CALLBACK_ORIGIN:-http://conductor:3210}
+      FUNRUN_CONDUCTOR_METRICS_LISTEN: 0.0.0.0:9101
     ports: ["3210:3210", "3211:3211"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -116,6 +120,23 @@ services:
     depends_on: [conductor]
     # > BACKEND_REQUEST_DRAIN_TIMEOUT (15 s): SIGKILL must not cut a drain short.
     stop_grace_period: 30s
+    deploy: { resources: { limits: { cpus: "${WORKER_CPUS:-4}" } } }
+
+  node-worker:
+    build: { context: ../.., dockerfile: self-hosted/funrun/Dockerfile }
+    command: ["./funrun_worker"]
+    profiles: ["node"]
+    env_file: [knobs.env]
+    environment:
+      <<: *common-env
+      FUNRUN_KIND: node
+      FUNCTION_HOST_URL: http://conductor:7401
+      FUNRUN_LISTEN: ${FUNRUN_LISTEN:-0.0.0.0:7400}
+      FUNRUN_METRICS_LISTEN: 0.0.0.0:9100
+      FUNRUN_NODE_MAX_CONCURRENT: ${FUNRUN_NODE_MAX_CONCURRENT:-4}
+    depends_on: [conductor]
+    # > NODE_ACTION_USER_TIMEOUT (10 min) + 30 s drain.
+    stop_grace_period: 11m
     deploy: { resources: { limits: { cpus: "${WORKER_CPUS:-4}" } } }
 
   # Same service as self-hosted/docker/docker-compose.yml. Log in with the key

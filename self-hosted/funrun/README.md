@@ -16,9 +16,12 @@ docker compose exec conductor ./generate_admin_key.sh
 ```
 
 `FUNCTION_RUNNER`, `FUNRUN_WORKERS`, `FUNRUN_ROUTING`, `FUNCTION_HOST_LISTEN`,
-`FUNRUN_LISTEN`, `CONDUCTOR_CPUS`, `WORKER_CPUS` are all overridable env vars
-(defaults: `remote`, `worker:7400`, `direct`, `0.0.0.0:7401`, `0.0.0.0:7400`,
-`4`, `4`).
+`FUNRUN_LISTEN`, `CONDUCTOR_CPUS`, `WORKER_CPUS`, `FUNRUN_NODE_WORKERS`,
+`FUNRUN_FALLBACK`, `FUNRUN_NODE_CALLBACK_ORIGIN`, `FUNRUN_KIND`,
+`FUNRUN_NODE_MAX_CONCURRENT`, `FUNRUN_NODE_DRAIN_TIMEOUT_SECS` are all
+overridable env vars (defaults: `remote`, `worker:7400`, `direct`,
+`0.0.0.0:7401`, `0.0.0.0:7400`, `4`, `4`, unset, `fail`,
+`http://conductor:3210`, `isolate`, `4`, `NODE_ACTION_USER_TIMEOUT + 30s`).
 
 To route through Envoy instead of direct DNS-based routing:
 
@@ -29,6 +32,45 @@ FUNRUN_ROUTING=proxy FUNRUN_WORKERS=envoy:7400 docker compose up -d conductor
 
 Bring it down: `docker compose down` (add `-v` to also drop the Postgres/RustFS
 volumes).
+
+## Node workers
+
+`"use node"` actions run in-process on the conductor (via `LocalNodeExecutor`)
+unless `FUNRUN_NODE_WORKERS` is set, in which case they run on a separate,
+stateless `node-worker` pool -- same idea as the isolate `worker` pool, but for
+Node.
+
+```sh
+FUNRUN_NODE_WORKERS=node-worker:7400 \
+  docker compose --profile node up -d --build --scale worker=2
+```
+
+- Unset (the default) means Node runs on the conductor, exactly like upstream.
+- `FUNRUN_FALLBACK` controls what happens when the Node pool has no healthy
+  worker: `fail` (default) rejects the action; `local` runs it in-process on
+  the conductor instead and increments `funrun_fallback_total{kind="node"}`.
+- Railway (or any host with a separate Node service): the Node service's
+  draining time must be at least 11 minutes (`stop_grace_period` /
+  `NODE_ACTION_USER_TIMEOUT` + drain), and `FUNRUN_NODE_CALLBACK_ORIGIN` must
+  point back at the conductor, e.g.
+  `http://conductor.railway.internal:3210`, not a public/loopback origin.
+
+## Health
+
+- `GET /api/funrun/status` -- admin-only JSON (`Authorization: Convex
+  <admin_key>`) with the isolate and Node pool state (`pools.isolate`,
+  `pools.node`) and the fallback counters.
+- `GET /funrun/status` -- a self-contained HTML page that polls the JSON
+  endpoint above; open http://127.0.0.1:3210/funrun/status after logging in.
+- The dashboard's Workers page (http://127.0.0.1:6791/workers) renders the
+  same data.
+- Conductor Prometheus metrics are on `:9101`
+  (`FUNRUN_CONDUCTOR_METRICS_LISTEN`), separate from each worker's own `:9100`
+  (`FUNRUN_METRICS_LISTEN`). The conductor exposes, per pool it routes to
+  (`isolate`/`node`): `funrun_worker_load_info{pool,addr}` (last reported load
+  per worker), `funrun_pool_healthy_info{pool}` (healthy worker count), and
+  `funrun_fallback_total{kind="isolate"|"deploy"|"node"}` (in-process
+  fallbacks).
 
 ## knobs.env
 
@@ -71,7 +113,19 @@ and are overridable env vars; **defaults are for local development only.**
 
 ## E2E equivalence suite
 
-`e2e/run.sh [local|direct|proxy ...]` brings the stack up once per config
-(default: all three), deploys `e2e/convex/`, runs `e2e/tests/` with vitest,
-checks that remote configs created isolates only on workers, and tears the stack
-down (`-v`). Uses the existing images; `BUILD=1` rebuilds first.
+`e2e/run.sh [local|direct|proxy|node ...]` brings the stack up once per config
+(default: all four), deploys `e2e/convex/`, runs `e2e/tests/` with vitest,
+checks that remote configs (`direct`/`proxy`/`node`) create zero isolates on
+the conductor -- including at deploy time -- and only on workers, and tears
+the stack down (`-v`). Uses the existing images; `BUILD=1` rebuilds first
+(conductor, worker, node-worker and dashboard).
+
+The `node` config additionally brings up `node-worker`, sets
+`FUNRUN_NODE_WORKERS=node-worker:7400`, and runs `e2e/tests/node.test.ts`
+(a real `"use node"` action using `node:crypto`/`node:os`), which checks the
+action ran on the worker's container hostname, not the conductor's. It then
+checks the conductor spawned no local Node subprocess, that
+`/api/funrun/status` reports a healthy `node` pool and 403s without an admin
+key, and exercises the `node` fallback path (stop `node-worker`, restart the
+conductor with `FUNRUN_FALLBACK=local`, rerun the Node test, and check
+`funrun_fallback_total{kind="node"}` on `:9101/metrics`).
