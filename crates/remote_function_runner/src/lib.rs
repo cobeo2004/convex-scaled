@@ -397,6 +397,7 @@ async fn execute_with_retries(
                 log_line_sender,
                 http_response.as_deref_mut(),
                 &mut http_body,
+                run_timeout,
             ),
         )
         .await
@@ -435,6 +436,7 @@ async fn execute_once(
     log_line_sender: Option<&mpsc::UnboundedSender<LogLine>>,
     mut http_response: Option<&mut HttpActionResponseStreamer>,
     http_body: &mut Option<BodyStream>,
+    run_timeout: Duration,
 ) -> anyhow::Result<Result<RunResult, AttemptFailure>> {
     // Open the call with an empty request stream and send the RunRequest only
     // once the worker answered with headers (it does so without waiting for
@@ -442,7 +444,7 @@ async fn execute_once(
     let (up_tx, up_rx) = mpsc::channel(8);
     let mut req = tonic::Request::new(ReceiverStream::new(up_rx));
     req.metadata_mut().insert(MODULE_HEADER, module);
-    req.set_timeout(*FUNRUN_RUN_FUNCTION_TIMEOUT);
+    req.set_timeout(run_timeout);
     let mut down = match client.execute(req).await {
         Ok(response) => response.into_inner(),
         // The worker never received the RunRequest: it is not sent yet.
@@ -673,6 +675,7 @@ mod tests {
         requests: Arc<AtomicUsize>,
         early: Arc<AtomicUsize>,
         bodies: Arc<Mutex<Vec<BodyChunk>>>,
+        grpc_timeouts: Arc<Mutex<Vec<String>>>,
         script: Script,
     }
 
@@ -695,6 +698,11 @@ mod tests {
             request: Request<Streaming<ExecuteUp>>,
         ) -> Result<Response<Self::ExecuteStream>, Status> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(timeout) = request.metadata().get("grpc-timeout") {
+                self.grpc_timeouts
+                    .lock()
+                    .push(timeout.to_str().unwrap().to_string());
+            }
             let mut up = request.into_inner();
             let requests = self.requests.clone();
             match (self.script)(call) {
@@ -778,6 +786,7 @@ mod tests {
             requests: Arc::new(AtomicUsize::new(0)),
             early: Arc::new(AtomicUsize::new(0)),
             bodies: Arc::new(Mutex::new(Vec::new())),
+            grpc_timeouts: Arc::new(Mutex::new(Vec::new())),
             script,
         };
         let socket = TcpSocket::new_v4().unwrap();
@@ -1008,6 +1017,17 @@ mod tests {
 
         assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn grpc_deadline_is_the_run_timeout() {
+        let (addr, fake) = start_fake_worker(succeeds).await;
+        let pool = pool_of(&[&addr]);
+
+        run(&pool, "m.js", UdfType::Query).await.unwrap();
+
+        // tonic encodes the 10s deadline in microseconds.
+        assert_eq!(*fake.grpc_timeouts.lock(), ["10000000u"]);
     }
 
     #[tokio::test]
