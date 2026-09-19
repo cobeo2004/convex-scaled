@@ -132,6 +132,7 @@ use crate::{
         may_retry,
         Delivery,
         FailureStage,
+        RequestKind,
     },
 };
 
@@ -423,7 +424,12 @@ async fn execute_with_retries(
             Ok(result) => return Ok(result),
             Err(failure) => failure,
         };
-        if !may_retry(udf_type, failure.stage, attempt, *FUNRUN_CLIENT_MAX_RETRIES) {
+        if !may_retry(
+            RequestKind::Run(udf_type),
+            failure.stage,
+            attempt,
+            *FUNRUN_CLIENT_MAX_RETRIES,
+        ) {
             return Err(failure.error);
         }
         tracing::warn!(
@@ -460,7 +466,7 @@ async fn execute_once(
         // The worker never received the RunRequest: it is not sent yet.
         Err(status) if is_transport_failure(&status) => {
             return Ok(Err(AttemptFailure {
-                stage: failure_stage(udf_type, Delivery::NotSent),
+                stage: failure_stage(RequestKind::Run(udf_type), Delivery::NotSent),
                 error: status.into_anyhow(),
             }));
         },
@@ -473,7 +479,7 @@ async fn execute_once(
     // handed to it, so nothing was sent.
     if up_tx.send(request).await.is_err() {
         return Ok(Err(AttemptFailure {
-            stage: failure_stage(udf_type, Delivery::NotSent),
+            stage: failure_stage(RequestKind::Run(udf_type), Delivery::NotSent),
             error: anyhow::anyhow!("funrun Execute stream closed before the RunRequest was sent"),
         }));
     }
@@ -502,14 +508,14 @@ async fn execute_once(
                 let inner = match frame {
                     Err(status) if is_transport_failure(&status) => {
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, lost(started)),
+                            stage: failure_stage(RequestKind::Run(udf_type), lost(started)),
                             error: status.into_anyhow(),
                         }));
                     },
                     Err(status) => return Err(status.into_anyhow()),
                     Ok(None) => {
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, lost(started)),
+                            stage: failure_stage(RequestKind::Run(udf_type), lost(started)),
                             error: anyhow::anyhow!("funrun Execute stream ended without a result"),
                         }));
                     },
@@ -551,7 +557,7 @@ async fn execute_once(
                         };
                         let error = ErrorMetadata::overloaded("FunrunWorkerOverloaded", reason);
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, delivery),
+                            stage: failure_stage(RequestKind::Run(udf_type), delivery),
                             error: error.into(),
                         }));
                     },

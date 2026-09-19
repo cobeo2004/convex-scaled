@@ -1,6 +1,34 @@
 use common::types::UdfType;
 use tonic::Code;
 
+/// What an `Execute` stream carries. Decides whether a lost attempt may
+/// run again after the worker may have started it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestKind {
+    Run(UdfType),
+    /// Deploy-time evaluation: pure, nothing commits.
+    Deploy,
+    /// Node `analyze` / `build_deps`. `build_deps` only PUTs one presigned
+    /// key, so a repeat overwrites the same object with the same zip.
+    NodePure,
+    /// A Node action: may have side effects.
+    NodeExecute,
+}
+
+impl RequestKind {
+    pub fn pure(self) -> bool {
+        match self {
+            // Nothing commits until the conductor commits, so Q/M are safe.
+            RequestKind::Run(UdfType::Query | UdfType::Mutation)
+            | RequestKind::Deploy
+            | RequestKind::NodePure => true,
+            RequestKind::Run(UdfType::Action | UdfType::HttpAction) | RequestKind::NodeExecute => {
+                false
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureStage {
     /// Nothing can have run yet. See `failure_stage`.
@@ -11,7 +39,7 @@ pub enum FailureStage {
 
 /// Whether a failed attempt may run again. `attempt` counts from 0.
 pub fn may_retry(
-    udf_type: UdfType,
+    kind: RequestKind,
     stage: FailureStage,
     attempt: usize,
     max_retries: usize,
@@ -21,12 +49,8 @@ pub fn may_retry(
     }
     match stage {
         FailureStage::BeforeStart => true,
-        // Nothing commits until the conductor commits, so Q/M are safe.
-        // Actions may have caused side effects.
-        FailureStage::AfterStart => match udf_type {
-            UdfType::Query | UdfType::Mutation => true,
-            UdfType::Action | UdfType::HttpAction => false,
-        },
+        // Side-effecting kinds may have caused side effects.
+        FailureStage::AfterStart => kind.pure(),
     }
 }
 
@@ -45,17 +69,20 @@ pub enum Delivery {
 
 /// Where an attempt failed, for `may_retry`.
 ///
-/// Actions count as started once the RunRequest was sent: the isolate may
-/// run user code before the worker's `Started` frame arrives, so only a
-/// failed call or an explicit `Overloaded` (sent instead of starting) proves
-/// nothing ran.
-pub fn failure_stage(udf_type: UdfType, delivery: Delivery) -> FailureStage {
+/// Side-effecting kinds count as started once the RunRequest was sent: the
+/// isolate may run user code before the worker's `Started` frame arrives, so
+/// only a failed call or an explicit `Overloaded` (sent instead of starting)
+/// proves nothing ran.
+pub fn failure_stage(kind: RequestKind, delivery: Delivery) -> FailureStage {
     match delivery {
         Delivery::NotSent | Delivery::Refused => FailureStage::BeforeStart,
         Delivery::LostAfterStarted => FailureStage::AfterStart,
-        Delivery::LostBeforeStarted => match udf_type {
-            UdfType::Query | UdfType::Mutation => FailureStage::BeforeStart,
-            UdfType::Action | UdfType::HttpAction => FailureStage::AfterStart,
+        Delivery::LostBeforeStarted => {
+            if kind.pure() {
+                FailureStage::BeforeStart
+            } else {
+                FailureStage::AfterStart
+            }
         },
     }
 }
@@ -104,17 +131,37 @@ mod tests {
             UdfType::Action,
             UdfType::HttpAction,
         ] {
-            assert!(may_retry(t, FailureStage::BeforeStart, 0, 4));
+            assert!(may_retry(
+                RequestKind::Run(t),
+                FailureStage::BeforeStart,
+                0,
+                4
+            ));
         }
     }
 
     #[test]
     fn after_start_only_queries_and_mutations() {
-        assert!(may_retry(UdfType::Query, FailureStage::AfterStart, 0, 4));
-        assert!(may_retry(UdfType::Mutation, FailureStage::AfterStart, 0, 4));
-        assert!(!may_retry(UdfType::Action, FailureStage::AfterStart, 0, 4));
+        assert!(may_retry(
+            RequestKind::Run(UdfType::Query),
+            FailureStage::AfterStart,
+            0,
+            4
+        ));
+        assert!(may_retry(
+            RequestKind::Run(UdfType::Mutation),
+            FailureStage::AfterStart,
+            0,
+            4
+        ));
         assert!(!may_retry(
-            UdfType::HttpAction,
+            RequestKind::Run(UdfType::Action),
+            FailureStage::AfterStart,
+            0,
+            4
+        ));
+        assert!(!may_retry(
+            RequestKind::Run(UdfType::HttpAction),
             FailureStage::AfterStart,
             0,
             4
@@ -130,7 +177,7 @@ mod tests {
             UdfType::HttpAction,
         ] {
             assert_eq!(
-                failure_stage(t, Delivery::NotSent),
+                failure_stage(RequestKind::Run(t), Delivery::NotSent),
                 FailureStage::BeforeStart
             );
         }
@@ -145,7 +192,7 @@ mod tests {
             UdfType::HttpAction,
         ] {
             assert_eq!(
-                failure_stage(t, Delivery::Refused),
+                failure_stage(RequestKind::Run(t), Delivery::Refused),
                 FailureStage::BeforeStart
             );
         }
@@ -155,11 +202,11 @@ mod tests {
     fn actions_after_request_sent_are_after_start_even_without_started() {
         for t in [UdfType::Action, UdfType::HttpAction] {
             assert_eq!(
-                failure_stage(t, Delivery::LostBeforeStarted),
+                failure_stage(RequestKind::Run(t), Delivery::LostBeforeStarted),
                 FailureStage::AfterStart
             );
             assert_eq!(
-                failure_stage(t, Delivery::LostAfterStarted),
+                failure_stage(RequestKind::Run(t), Delivery::LostAfterStarted),
                 FailureStage::AfterStart
             );
         }
@@ -169,11 +216,11 @@ mod tests {
     fn queries_and_mutations_follow_started() {
         for t in [UdfType::Query, UdfType::Mutation] {
             assert_eq!(
-                failure_stage(t, Delivery::LostBeforeStarted),
+                failure_stage(RequestKind::Run(t), Delivery::LostBeforeStarted),
                 FailureStage::BeforeStart
             );
             assert_eq!(
-                failure_stage(t, Delivery::LostAfterStarted),
+                failure_stage(RequestKind::Run(t), Delivery::LostAfterStarted),
                 FailureStage::AfterStart
             );
         }
@@ -209,6 +256,47 @@ mod tests {
 
     #[test]
     fn budget_is_enforced() {
-        assert!(!may_retry(UdfType::Query, FailureStage::BeforeStart, 4, 4));
+        assert!(!may_retry(
+            RequestKind::Run(UdfType::Query),
+            FailureStage::BeforeStart,
+            4,
+            4
+        ));
+    }
+
+    #[test]
+    fn pure_kinds_retry_after_start() {
+        for kind in [
+            RequestKind::Run(UdfType::Query),
+            RequestKind::Run(UdfType::Mutation),
+            RequestKind::Deploy,
+            RequestKind::NodePure,
+        ] {
+            assert!(kind.pure(), "{kind:?}");
+            assert!(may_retry(kind, FailureStage::AfterStart, 0, 2), "{kind:?}");
+            assert_eq!(
+                failure_stage(kind, Delivery::LostBeforeStarted),
+                FailureStage::BeforeStart,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn side_effecting_kinds_do_not_retry_after_start() {
+        for kind in [
+            RequestKind::Run(UdfType::Action),
+            RequestKind::Run(UdfType::HttpAction),
+            RequestKind::NodeExecute,
+        ] {
+            assert!(!kind.pure(), "{kind:?}");
+            assert!(!may_retry(kind, FailureStage::AfterStart, 0, 2), "{kind:?}");
+            assert!(may_retry(kind, FailureStage::BeforeStart, 0, 2), "{kind:?}");
+            assert_eq!(
+                failure_stage(kind, Delivery::LostBeforeStarted),
+                FailureStage::AfterStart,
+                "{kind:?}"
+            );
+        }
     }
 }
