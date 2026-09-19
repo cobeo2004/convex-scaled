@@ -111,6 +111,7 @@ pub fn text_search_request_from_proto(p: TextSearchRequest) -> anyhow::Result<Te
         })
         .collect::<anyhow::Result<_>>()?;
     let version = match pb_funrun::funrun::SearchVersion::try_from(p.version)? {
+        pb_funrun::funrun::SearchVersion::Unspecified => anyhow::bail!("missing search version"),
         pb_funrun::funrun::SearchVersion::V1 => SearchVersion::V1,
         pb_funrun::funrun::SearchVersion::V2 => SearchVersion::V2,
     };
@@ -239,6 +240,14 @@ mod tests {
         assert_eq!(back.search, args.search);
         assert_eq!(back.version, SearchVersion::V2);
         assert_eq!(back.pending_updates, args.pending_updates);
+    }
+
+    #[test]
+    fn unspecified_search_version_is_rejected() {
+        let mut proto = text_search_request_to_proto(&sample_search_args()).unwrap();
+        proto.version = 0;
+        let err = text_search_request_from_proto(proto).unwrap_err();
+        assert!(format!("{err:#}").contains("search version"), "{err:#}");
     }
 
     #[test]

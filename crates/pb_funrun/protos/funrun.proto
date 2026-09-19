@@ -243,8 +243,10 @@ message InternalSearchFilter {
 }
 
 enum SearchVersion {
-  SEARCH_VERSION_V1 = 0;
-  SEARCH_VERSION_V2 = 1;
+  // proto3 default: an unset version is rejected, never read as V1.
+  SEARCH_VERSION_UNSPECIFIED = 0;
+  SEARCH_VERSION_V1 = 1;
+  SEARCH_VERSION_V2 = 2;
 }
 
 message CandidateRevisionWithKey {
@@ -323,6 +325,8 @@ message HttpActionRoute {
 
 // One variant per ActionCallbacks method, same order as the request.
 message ActionCallbackResponse {
+  // Was the untyped `function_result` before replies became one per method.
+  reserved 1;
   oneof result {
     common.FunctionResult execute_query = 2;
     common.FunctionResult execute_mutation = 3;
