@@ -80,6 +80,7 @@ use futures::{
 };
 use keybroker::Identity;
 use model::{
+    components::auth::propagate_component_auth,
     config::types::ModuleConfig,
     environment_variables::types::{
         EnvVarName,
@@ -242,6 +243,15 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             subfunctions_in_same_isolate: *SUBFUNCTIONS_IN_SAME_ISOLATE,
             s3_prefix: self.s3_prefix.clone(),
         };
+        // Upstream `FunctionRunnerCore` runs an HTTP action as its component
+        // and records that identity in the outcome; rebuild it the same way.
+        let outcome_identity = match &parts.http {
+            Some(http) => {
+                let component = http.http_module_path.path().component;
+                propagate_component_auth(&parts.identity, component, component.is_root())
+            },
+            None => parts.identity.clone(),
+        };
         let request = run_request_to_proto(&parts)?;
         // NOTE: as in process, no result or error surfaces before the
         // retention check below.
@@ -265,7 +275,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
                 result,
                 parts.function_metadata.map(|m| m.path_and_args),
                 parts.http.map(|h| (h.http_module_path, h.head)),
-                parts.identity.into(),
+                outcome_identity.into(),
             )?;
             Ok((transaction, outcome, usage))
         });

@@ -3,6 +3,7 @@
 //! how busy this worker is.
 
 use std::{
+    future::Future,
     sync::{
         atomic::{
             AtomicUsize,
@@ -28,6 +29,7 @@ use common::{
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
         MAX_ISOLATE_WORKERS,
     },
+    log_lines::LogLine,
     runtime::tokio_spawn,
 };
 use errors::ErrorMetadataAnyhowExt;
@@ -91,6 +93,7 @@ use tonic::{
 };
 use udf::{
     HttpActionRequest,
+    HttpActionResponsePart,
     HttpActionResponseStreamer,
 };
 
@@ -241,9 +244,9 @@ impl FunrunService {
         // Unbounded because upstream's `log_line_sender` and
         // `HttpActionResponseStreamer` take `UnboundedSender`s; the loop below
         // drains both into the bounded down stream.
-        let (log_tx, mut log_rx) = mpsc::unbounded_channel();
-        let (started_tx, mut started_rx) = oneshot::channel();
-        let (resp_tx, mut resp_rx) = mpsc::unbounded_channel();
+        let (log_tx, log_rx) = mpsc::unbounded_channel();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (resp_tx, resp_rx) = mpsc::unbounded_channel();
         // Keep the request half open while the run lives, even when it has no
         // body to read.
         let mut up = Some(up);
@@ -283,45 +286,76 @@ impl FunrunService {
         let run =
             self.core
                 .run_function_no_retention_check(args, parts.function_metadata, http_meta);
-        tokio::pin!(run);
-        let mut started_pending = true;
-        loop {
-            tokio::select! {
-                biased;
-                // ponytail: upstream does not stop an HttpAction isolate when
-                // its response closes (isolate_worker.rs:196-236); dropping
-                // `run` here frees the slot early, same as in process. Stop the
-                // isolate too if leaked work shows up in load.
-                _ = tx.closed() => return Err(Status::cancelled("Execute stream dropped")),
-                started = &mut started_rx, if started_pending => {
-                    started_pending = false;
-                    if started.is_ok() {
-                        send(tx, Down::Started(Started {})).await?;
-                    }
-                },
-                Some(line) = log_rx.recv() => send(tx, Down::LogLine(line.into())).await?,
-                Some(part) = resp_rx.recv() => send_down(tx, response_part_to_down(part)).await?,
-                result = &mut run => {
-                    // Flush what the run queued before its result, like
-                    // `InProcessFunctionRunner::run_http_action`.
-                    while let Ok(line) = log_rx.try_recv() {
-                        send(tx, Down::LogLine(line.into())).await?;
-                    }
-                    while let Ok(part) = resp_rx.try_recv() {
-                        send_down(tx, response_part_to_down(part)).await?;
-                    }
-                    let (transaction, outcome, usage) = match result {
-                        Ok(run) => run,
-                        // Overloaded only replaces Started: a nested UDF rejected
-                        // after Started is a plain failure.
-                        Err(e) if started_pending => return send(tx, run_error_to_down(e)?).await,
-                        Err(e) => return Err(Status::from_anyhow(e)),
-                    };
-                    let result = run_result_to_proto(transaction, outcome, usage)
-                        .map_err(Status::from_anyhow)?;
-                    return send(tx, Down::Result(result)).await;
-                },
-            }
+        drive(
+            run,
+            started_rx,
+            log_rx,
+            resp_rx,
+            tx,
+            |(transaction, outcome, usage)| {
+                run_result_to_proto(transaction, outcome, usage)
+                    .map(Down::Result)
+                    .map_err(Status::from_anyhow)
+            },
+        )
+        .await
+    }
+}
+
+/// Streams a run down in order: `Started` once the isolate starts it, log
+/// lines and HTTP response parts as they arrive, then the result.
+async fn drive<T>(
+    run: impl Future<Output = anyhow::Result<T>>,
+    mut started_rx: oneshot::Receiver<()>,
+    mut log_rx: mpsc::UnboundedReceiver<LogLine>,
+    mut resp_rx: mpsc::UnboundedReceiver<HttpActionResponsePart>,
+    tx: &DownSender,
+    to_result: impl FnOnce(T) -> Result<Down, Status>,
+) -> Result<(), Status> {
+    tokio::pin!(run);
+    // Closed without a send means the scheduler rejected the run, which is
+    // still Overloaded: track "sent Started", not "channel done".
+    let mut started_open = true;
+    let mut started = false;
+    loop {
+        tokio::select! {
+            biased;
+            // ponytail: upstream does not stop an HttpAction isolate when
+            // its response closes (isolate_worker.rs:196-236); dropping
+            // `run` here frees the slot early, same as in process. Stop the
+            // isolate too if leaked work shows up in load.
+            _ = tx.closed() => return Err(Status::cancelled("Execute stream dropped")),
+            signal = &mut started_rx, if started_open => {
+                started_open = false;
+                if signal.is_ok() {
+                    started = true;
+                    send(tx, Down::Started(Started {})).await?;
+                }
+            },
+            Some(line) = log_rx.recv() => send(tx, Down::LogLine(line.into())).await?,
+            Some(part) = resp_rx.recv() => send_down(tx, response_part_to_down(part)).await?,
+            result = &mut run => {
+                // The run may have started and finished within one poll.
+                if started_open && started_rx.try_recv().is_ok() {
+                    started = true;
+                    send(tx, Down::Started(Started {})).await?;
+                }
+                // Flush what the run queued before its result, like
+                // `InProcessFunctionRunner::run_http_action`.
+                while let Ok(line) = log_rx.try_recv() {
+                    send(tx, Down::LogLine(line.into())).await?;
+                }
+                while let Ok(part) = resp_rx.try_recv() {
+                    send_down(tx, response_part_to_down(part)).await?;
+                }
+                return match result {
+                    Ok(value) => send(tx, to_result(value)?).await,
+                    // Overloaded only replaces Started: a nested UDF rejected
+                    // after Started is a plain failure.
+                    Err(e) if !started => send(tx, run_error_to_down(e)?).await,
+                    Err(e) => Err(Status::from_anyhow(e)),
+                };
+            },
         }
     }
 }
@@ -486,12 +520,71 @@ mod tests {
         execute_down::Inner as Down,
         Overloaded,
     };
+    use tokio::sync::{
+        mpsc,
+        oneshot,
+    };
 
     use super::{
+        drive,
         ensure_same_instance,
         run_error_to_down,
         InFlightGuard,
     };
+
+    fn rejected() -> anyhow::Error {
+        anyhow::anyhow!("queue").context(ErrorMetadata::rejected_before_execution(
+            "ExpiredInQueue",
+            "too long in queue",
+        ))
+    }
+
+    /// Runs `drive` with a run that may signal Started before failing with
+    /// `rejected()`, and returns the frames sent down (or the error status).
+    async fn frames(signal_started: bool) -> (Vec<&'static str>, Option<tonic::Code>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (_log_tx, log_rx) = mpsc::unbounded_channel();
+        let (_resp_tx, resp_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
+        // Like the isolate scheduler: the sender is gone by the time the run
+        // resolves, whether or not it was used.
+        let run = async move {
+            if signal_started {
+                started_tx.send(()).unwrap();
+            } else {
+                drop(started_tx);
+            }
+            // Resolve on a later poll, so `drive` sees the channel first.
+            tokio::task::yield_now().await;
+            Err::<(), _>(rejected())
+        };
+        let status = drive(run, started_rx, log_rx, resp_rx, &tx, |()| unreachable!())
+            .await
+            .err()
+            .map(|s| s.code());
+        drop(tx);
+        let mut names = vec![];
+        while let Some(Ok(down)) = rx.recv().await {
+            names.push(match down.inner {
+                Some(Down::Started(_)) => "Started",
+                Some(Down::Overloaded(_)) => "Overloaded",
+                _ => "other",
+            });
+        }
+        (names, status)
+    }
+
+    #[tokio::test]
+    async fn rejected_before_start_is_overloaded_even_if_started_channel_closes_first() {
+        assert_eq!(frames(false).await, (vec!["Overloaded"], None));
+    }
+
+    #[tokio::test]
+    async fn rejected_after_started_is_a_plain_error() {
+        let (names, status) = frames(true).await;
+        assert_eq!(names, vec!["Started"]);
+        assert!(status.is_some());
+    }
 
     #[test]
     fn admission_rejects_at_limit_and_guard_drop_frees_a_slot() {
@@ -524,11 +617,7 @@ mod tests {
 
     #[test]
     fn rejected_before_execution_is_sent_as_overloaded() {
-        let error = anyhow::anyhow!("queue").context(ErrorMetadata::rejected_before_execution(
-            "ExpiredInQueue",
-            "too long in queue",
-        ));
-        let Ok(Down::Overloaded(Overloaded { reason })) = run_error_to_down(error) else {
+        let Ok(Down::Overloaded(Overloaded { reason })) = run_error_to_down(rejected()) else {
             panic!("expected Overloaded");
         };
         assert!(reason.contains("too long in queue"), "{reason}");
