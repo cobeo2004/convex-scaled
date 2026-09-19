@@ -261,6 +261,13 @@ impl LocalNodeExecutor {
         request_json: JsonValue,
         log_line_sender: mpsc::UnboundedSender<LogLine>,
     ) -> anyhow::Result<InvokeResponse> {
+        let client = self.client().await?;
+        self.post_invoke(client, request_json, log_line_sender)
+            .await
+    }
+
+    /// Starts the Node server on first use.
+    async fn client(&self) -> anyhow::Result<reqwest::Client> {
         let client = {
             let mut inner = self.inner.lock().await;
             if inner.is_none() {
@@ -273,7 +280,15 @@ impl LocalNodeExecutor {
             let inner = inner.as_ref().unwrap();
             inner.client.clone()
         };
+        Ok(client)
+    }
 
+    async fn post_invoke(
+        &self,
+        client: reqwest::Client,
+        request_json: JsonValue,
+        log_line_sender: mpsc::UnboundedSender<LogLine>,
+    ) -> anyhow::Result<InvokeResponse> {
         let response_result = client
             .post("http://localhost/invoke".to_string())
             .json(&request_json)
@@ -346,7 +361,9 @@ impl NodeExecutor for LocalNodeExecutor {
         request: ExecutorRequest,
         log_line_sender: mpsc::UnboundedSender<LogLine>,
     ) -> anyhow::Result<InvokeResponse> {
-        self.invoke_json(JsonValue::try_from(request)?, log_line_sender)
+        let client = self.client().await?;
+        let request_json = JsonValue::try_from(request)?;
+        self.post_invoke(client, request_json, log_line_sender)
             .await
     }
 
