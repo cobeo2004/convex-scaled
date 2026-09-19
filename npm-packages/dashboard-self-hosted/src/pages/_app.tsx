@@ -7,7 +7,11 @@ import Head from "next/head";
 import { useQuery } from "convex/react";
 import udfs from "@common/udfs";
 import { useSessionStorage } from "react-use";
-import { ExitIcon, GearIcon } from "@radix-ui/react-icons";
+import {
+  ExitIcon,
+  GearIcon,
+  TextAlignBottomIcon,
+} from "@radix-ui/react-icons";
 import { ConvexLogo } from "@common/elements/ConvexLogo";
 import { ToastContainer } from "@common/elements/ToastContainer";
 import { ThemeConsumer } from "@common/elements/ThemeConsumer";
@@ -33,6 +37,7 @@ import {
   DeploymentInfo,
   DeploymentInfoContext,
 } from "@common/lib/deploymentContext";
+import { useAdminKey, useDeploymentUrl } from "@common/lib/deploymentApi";
 import { Tooltip } from "@ui/Tooltip";
 import { DeploymentCredentialsForm } from "components/DeploymentCredentialsForm";
 import { DeploymentList } from "components/DeploymentList";
@@ -62,6 +67,23 @@ const SelfHostedSettingsContext = createContext<{
   visiblePages: undefined,
 });
 
+// Probes whether the deployment's remote function runner (funrun) is
+// enabled, to decide whether to show the "Workers" sidebar item.
+function useFunrunEnabled(): boolean {
+  const deploymentUrl = useDeploymentUrl();
+  const adminKey = useAdminKey();
+  const [enabled, setEnabled] = useState(false);
+  useEffect(() => {
+    if (!deploymentUrl || !adminKey) return;
+    fetch(`${deploymentUrl}/api/funrun/status`, {
+      headers: { Authorization: `Convex ${adminKey}` },
+    })
+      .then((r) => setEnabled(r.ok))
+      .catch(() => setEnabled(false));
+  }, [deploymentUrl, adminKey]);
+  return enabled;
+}
+
 /**
  * Wrapper component that consumes SelfHostedSettingsContext and passes
  * the settings to DeploymentDashboardLayout
@@ -72,9 +94,24 @@ function DeploymentDashboardLayoutWrapper({
   children: JSX.Element;
 }) {
   const { visiblePages } = useContext(SelfHostedSettingsContext);
+  const funrunEnabled = useFunrunEnabled();
 
   return (
-    <DeploymentDashboardLayout visiblePages={visiblePages}>
+    <DeploymentDashboardLayout
+      visiblePages={visiblePages}
+      extraExploreItems={
+        funrunEnabled
+          ? [
+              {
+                key: "workers",
+                label: "Workers",
+                Icon: TextAlignBottomIcon,
+                href: "/workers",
+              },
+            ]
+          : undefined
+      }
+    >
       {children}
     </DeploymentDashboardLayout>
   );

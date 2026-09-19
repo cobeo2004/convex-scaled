@@ -25,6 +25,7 @@ import { PulseIcon } from "@common/elements/icons";
 import {
   Sidebar,
   SidebarGroup,
+  SidebarItem,
   useCurrentPage,
 } from "@common/elements/Sidebar";
 import { FunctionRunnerWrapper } from "@common/features/functionRunner/components/FunctionRunnerWrapper";
@@ -42,6 +43,7 @@ type LayoutProps = {
   visiblePages?: string[];
   onRanCustomQuery?: () => void;
   onCopiedQueryResult?: () => void;
+  extraExploreItems?: SidebarItem[];
 };
 
 export function DeploymentDashboardLayout({
@@ -50,6 +52,7 @@ export function DeploymentDashboardLayout({
   visiblePages,
   onRanCustomQuery,
   onCopiedQueryResult,
+  extraExploreItems,
 }: LayoutProps) {
   const [collapsed, setCollapsed] = useCollapseSidebarState();
   const [isGlobalRunnerVertical, setIsGlobalRunnerVertical] =
@@ -111,12 +114,17 @@ export function DeploymentDashboardLayout({
     },
   ];
 
+  const exploreItems = [
+    ...allExploreDeploymentPages,
+    ...(extraExploreItems ?? []),
+  ];
+
   // Filter tabs based on visiblePages if provided
   const exploreDeploymentPages = visiblePages
-    ? allExploreDeploymentPages.filter((page) =>
-        visiblePages.includes(page.key),
+    ? exploreItems.filter(
+        (page) => page.key !== null && visiblePages.includes(page.key),
       )
-    : allExploreDeploymentPages;
+    : exploreItems;
 
   const allConfigureItems = [
     {
