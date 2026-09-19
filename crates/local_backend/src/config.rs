@@ -168,6 +168,25 @@ pub struct LocalConfig {
     #[clap(long, env = "FUNCTION_HOST_LISTEN", default_value = "0.0.0.0:7401")]
     pub function_host_listen: SocketAddr,
 
+    /// Node worker target (`host:port`) for `"use node"` actions in remote
+    /// mode. Unset (or empty) runs them in this process.
+    #[clap(long, env = "FUNRUN_NODE_WORKERS")]
+    pub funrun_node_workers: Option<String>,
+
+    /// What to do when no worker can take a request: `fail` it, or run it
+    /// `local`ly in this process.
+    #[clap(long, env = "FUNRUN_FALLBACK", value_enum, default_value_t = FunrunFallback::Fail)]
+    pub funrun_fallback: FunrunFallback,
+
+    /// Origin Node workers use to call back into this backend. Defaults to
+    /// the Convex origin.
+    #[clap(long, env = "FUNRUN_NODE_CALLBACK_ORIGIN")]
+    pub funrun_node_callback_origin: Option<String>,
+
+    /// Address to serve this backend's Prometheus metrics on.
+    #[clap(long, env = "FUNRUN_CONDUCTOR_METRICS_LISTEN")]
+    pub funrun_conductor_metrics_listen: Option<SocketAddr>,
+
     #[clap(subcommand)]
     pub subcommand: Option<Subcommand>,
 }
@@ -177,6 +196,13 @@ pub enum FunctionRunnerMode {
     #[default]
     Local,
     Remote,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FunrunFallback {
+    #[default]
+    Fail,
+    Local,
 }
 
 #[derive(ClapSubcommand, Clone)]
@@ -290,4 +316,74 @@ impl LocalConfig {
         }
     }
 
+    /// `FUNRUN_NODE_WORKERS`, with empty treated as unset (compose passes
+    /// `${FUNRUN_NODE_WORKERS:-}`).
+    pub fn node_workers(&self) -> Option<&str> {
+        self.funrun_node_workers
+            .as_deref()
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn node_callback_origin(&self) -> anyhow::Result<ConvexOrigin> {
+        match &self.funrun_node_callback_origin {
+            Some(o) => {
+                anyhow::ensure!(
+                    o.starts_with("https://") || o.starts_with("http://"),
+                    "FUNRUN_NODE_CALLBACK_ORIGIN should start with https:// or http:// but got \
+                     '{o}'"
+                );
+                Ok(o.clone().into())
+            },
+            None => self.convex_origin_url(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{
+        FunrunFallback,
+        LocalConfig,
+    };
+
+    #[test]
+    fn funrun_node_flags_parse() {
+        let c = LocalConfig::try_parse_from([
+            "convex-local-backend",
+            "--function-runner",
+            "remote",
+            "--funrun-workers",
+            "worker:7400",
+            "--funrun-node-workers",
+            "node-worker:7400",
+            "--funrun-fallback",
+            "local",
+            "--funrun-node-callback-origin",
+            "http://conductor:3210",
+        ])
+        .unwrap();
+        assert_eq!(c.funrun_node_workers.as_deref(), Some("node-worker:7400"));
+        assert_eq!(c.funrun_fallback, FunrunFallback::Local);
+        assert_eq!(&*c.node_callback_origin().unwrap(), "http://conductor:3210");
+    }
+
+    #[test]
+    fn funrun_fallback_defaults_to_fail() {
+        let c = LocalConfig::try_parse_from(["convex-local-backend"]).unwrap();
+        assert_eq!(c.funrun_fallback, FunrunFallback::Fail);
+        assert!(c.funrun_node_workers.is_none());
+        assert_eq!(
+            c.node_callback_origin().unwrap(),
+            c.convex_origin_url().unwrap()
+        );
+    }
+
+    #[test]
+    fn funrun_empty_node_workers_is_unset() {
+        let c = LocalConfig::try_parse_from(["convex-local-backend", "--funrun-node-workers", ""])
+            .unwrap();
+        assert_eq!(c.node_workers(), None);
+    }
 }

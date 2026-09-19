@@ -77,17 +77,22 @@ pub struct WorkerPool {
     workers: Mutex<BTreeMap<String, Worker>>,
     // Family of the first address DNS returned; see `prefer_family`.
     prefer_ipv6: AtomicBool,
+    /// `"isolate"` or `"node"`; labels this pool's metrics.
+    #[allow(dead_code)] // ponytail: read by the pool gauges (Task 8).
+    name: &'static str,
 }
 
 impl WorkerPool {
-    /// `target` is `host:port`. `token` is the funrun bearer token.
+    /// `target` is `host:port`. `token` is the funrun bearer token. `name`
+    /// labels the pool's metrics.
     pub fn start<RT: Runtime>(
         rt: RT,
         target: String,
         mode: RoutingMode,
         token: String,
+        name: &'static str,
     ) -> anyhow::Result<Arc<Self>> {
-        let pool = Self::empty();
+        let pool = Self::named(name);
         match mode {
             RoutingMode::Proxy => {
                 let client = connect(&target, token)?;
@@ -159,10 +164,16 @@ impl WorkerPool {
         self.workers.lock().values().any(|w| w.state.healthy)
     }
 
+    #[cfg(test)]
     pub(crate) fn empty() -> Arc<Self> {
+        Self::named("test")
+    }
+
+    fn named(name: &'static str) -> Arc<Self> {
         Arc::new(Self {
             workers: Mutex::new(BTreeMap::new()),
             prefer_ipv6: AtomicBool::new(false),
+            name,
         })
     }
 

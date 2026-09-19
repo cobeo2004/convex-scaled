@@ -6117,6 +6117,7 @@ dependencies = [
  "moka",
  "node_executor",
  "parking_lot",
+ "performance_stats",
  "proptest",
  "remote_function_runner",
  "reqwest",
