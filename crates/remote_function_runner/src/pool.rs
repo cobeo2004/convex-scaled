@@ -234,8 +234,16 @@ impl WorkerPool {
     fn sync_workers<RT: Runtime>(self: &Arc<Self>, rt: &RT, addrs: &BTreeSet<String>, token: &str) {
         let mut workers = self.workers.lock();
         let before = workers.len();
-        // Dropping a worker aborts its WatchLoad task.
-        workers.retain(|addr, _| addrs.contains(addr));
+        // Dropping a worker aborts its WatchLoad task. Its load series goes
+        // too, so DNS churn does not grow the gauge's cardinality.
+        workers.retain(|addr, _| {
+            let keep = addrs.contains(addr);
+            if !keep {
+                // Err only when the series was never set.
+                let _ = FUNRUN_WORKER_LOAD_INFO.remove_label_values(&[self.name, addr]);
+            }
+            keep
+        });
         let worker_removed = workers.len() < before;
         for addr in addrs {
             if workers.contains_key(addr) {
@@ -299,20 +307,23 @@ impl WorkerPool {
                                     break;
                                 }
                                 delay = RECONNECT_DELAY;
+                                // The gauge is set under the workers lock, so
+                                // it cannot outlive `sync_workers` removing
+                                // this worker's series.
                                 self.update(&addr, |w| {
                                     w.state.load = report.effective_load;
                                     w.state.healthy = true;
                                     w.last_report = Some(Instant::now());
+                                    log_gauge_with_labels(
+                                        &FUNRUN_WORKER_LOAD_INFO,
+                                        report.effective_load,
+                                        vec![
+                                            StaticMetricLabel::new("pool", self.name),
+                                            StaticMetricLabel::new("addr", addr.clone()),
+                                        ],
+                                    );
                                 });
                                 self.report_healthy();
-                                log_gauge_with_labels(
-                                    &FUNRUN_WORKER_LOAD_INFO,
-                                    report.effective_load,
-                                    vec![
-                                        StaticMetricLabel::new("pool", self.name),
-                                        StaticMetricLabel::new("addr", addr.clone()),
-                                    ],
-                                );
                             },
                             Ok(None) => {
                                 tracing::warn!("funrun worker {addr} ended WatchLoad");

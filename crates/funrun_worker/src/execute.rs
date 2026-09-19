@@ -234,8 +234,9 @@ impl FunrunService {
     }
 
     /// Runs one Execute stream. Returns when the run finished and its result
-    /// was sent, or as soon as the client goes away, which drops (cancels)
-    /// the run future and releases the in-flight slot.
+    /// was sent, or, for runs and Node actions, as soon as the client goes
+    /// away, which drops (cancels) the run future and releases the in-flight
+    /// slot. A deploy runs to completion (see `deploy`).
     async fn run(&self, mut up: Streaming<ExecuteUp>, tx: &DownSender) -> Result<(), Status> {
         let first = tokio::time::timeout(FIRST_FRAME_TIMEOUT, up.message())
             .await
@@ -274,7 +275,10 @@ impl FunrunService {
         send(tx, Down::Overloaded(Overloaded { reason })).await
     }
 
-    /// Deploy-time evaluation: no storage or host, just the isolate.
+    /// Deploy-time evaluation: no storage or host, just the isolate. Unlike
+    /// `run` and `node`, it has no `tx.closed()` early cancellation: a
+    /// client that goes away does not stop it. The isolate's user and system
+    /// timeouts bound it instead.
     async fn deploy(&self, request: DeployRequest, tx: &DownSender) -> Result<(), Status> {
         let Some(_in_flight) = self.try_acquire() else {
             return self.overloaded(tx).await;

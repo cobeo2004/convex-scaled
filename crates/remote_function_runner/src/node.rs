@@ -64,11 +64,11 @@ impl NodeExecutor for RemoteNodeExecutor {
         request: ExecutorRequest,
         log_line_sender: mpsc::UnboundedSender<LogLine>,
     ) -> anyhow::Result<InvokeResponse> {
-        if let Some(f) = &self.fallback {
-            if !self.pool.has_healthy() {
-                log_fallback(FallbackKind::Node);
-                return f.invoke(request, log_line_sender).await;
-            }
+        if let Some(f) = &self.fallback
+            && !self.pool.has_healthy()
+        {
+            log_fallback(FallbackKind::Node);
+            return f.invoke(request, log_line_sender).await;
         }
         let kind = match &request {
             ExecutorRequest::Execute { .. } => RequestKind::NodeExecute,

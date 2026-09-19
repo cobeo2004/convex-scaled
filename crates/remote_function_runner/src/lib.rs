@@ -1,6 +1,8 @@
 //! Conductor side of remote function execution: `RemoteFunctionRunner` sends
 //! `run_function` to a funrun worker and retries only when that cannot run a
-//! function's side effects twice. Everything else runs in process.
+//! function's side effects twice. With `FUNCTION_RUNNER=remote`, runs and
+//! deploy-time evaluation go to funrun workers, and Node actions go to the
+//! Node worker pool when `FUNRUN_NODE_WORKERS` is set.
 
 use std::{
     collections::{
@@ -142,7 +144,6 @@ use crate::{
         is_transport_failure,
         may_retry,
         Delivery,
-        FailureStage,
         RequestKind,
     },
 };
@@ -198,32 +199,35 @@ impl<RT: Runtime> RemoteFunctionRunner<RT> {
         log_fallback(kind);
         Some(local)
     }
+}
 
-    /// Runs one deploy-time evaluation on a worker. Only `analyze` may
-    /// answer with a user `JsError` value.
-    async fn deploy(&self, call: DeployCall) -> anyhow::Result<Result<DeployReturn, JsError>> {
-        let up = Up::Deploy(call.try_into()?);
-        // ponytail: in process these evaluations have no outer deadline; the
-        // isolate's own user/system timeouts bound them on the worker too.
-        // This is only the conductor's safety net, so it reuses the run one.
-        let Terminal::Deploy(r) = execute_with_retries(
-            &self.pool,
-            "_deploy",
-            RequestKind::Deploy,
-            up,
-            None,
-            None,
-            None,
-            *FUNRUN_RUN_FUNCTION_TIMEOUT,
-        )
-        .await?
-        else {
-            anyhow::bail!("worker answered a deploy request with a non-deploy frame");
-        };
-        match r.result.context("empty DeployResult")? {
-            deploy_result::Result::Json(b) => Ok(Ok(decode_return(&b)?)),
-            deploy_result::Result::JsError(e) => Ok(Err(JsError::try_from(e)?)),
-        }
+/// Runs one deploy-time evaluation on a worker. Only `analyze` may
+/// answer with a user `JsError` value.
+async fn deploy(
+    pool: &Arc<WorkerPool>,
+    call: DeployCall,
+) -> anyhow::Result<Result<DeployReturn, JsError>> {
+    let up = Up::Deploy(call.try_into()?);
+    // ponytail: in process these evaluations have no outer deadline; the
+    // isolate's own user/system timeouts bound them on the worker too.
+    // This is only the conductor's safety net, so it reuses the run one.
+    let Terminal::Deploy(r) = execute_with_retries(
+        pool,
+        "_deploy",
+        RequestKind::Deploy,
+        up,
+        None,
+        None,
+        None,
+        *FUNRUN_RUN_FUNCTION_TIMEOUT,
+    )
+    .await?
+    else {
+        anyhow::bail!("worker answered a deploy request with a non-deploy frame");
+    };
+    match r.result.context("empty DeployResult")? {
+        deploy_result::Result::Json(b) => Ok(Ok(decode_return(&b)?)),
+        deploy_result::Result::JsError(e) => Ok(Err(JsError::try_from(e)?)),
     }
 }
 
@@ -378,7 +382,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             modules,
             environment_variables,
         };
-        match self.deploy(call).await? {
+        match deploy(&self.pool, call).await? {
             Ok(DeployReturn::Analyze(m)) => Ok(Ok(m)),
             Ok(other) => anyhow::bail!("worker returned {} for analyze", other.kind_name()),
             Err(js) => Ok(Err(js)),
@@ -411,7 +415,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             user_environment_variables,
             system_env_vars,
         };
-        match self.deploy(call).await? {
+        match deploy(&self.pool, call).await? {
             Ok(DeployReturn::AppDefinitions(r)) => Ok(r),
             Ok(other) => anyhow::bail!("worker returned {} for app definitions", other.kind_name()),
             Err(js) => anyhow::bail!("unexpected JsError from app definitions: {js}"),
@@ -438,7 +442,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             args,
             name,
         };
-        match self.deploy(call).await? {
+        match deploy(&self.pool, call).await? {
             Ok(DeployReturn::ComponentInitializer(r)) => Ok(r),
             Ok(other) => anyhow::bail!(
                 "worker returned {} for component initializer",
@@ -466,7 +470,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             rng_seed,
             unix_timestamp,
         };
-        match self.deploy(call).await? {
+        match deploy(&self.pool, call).await? {
             Ok(DeployReturn::Schema(s)) => Ok(s),
             Ok(other) => anyhow::bail!("worker returned {} for schema", other.kind_name()),
             Err(js) => anyhow::bail!("unexpected JsError from schema: {js}"),
@@ -496,7 +500,7 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
             environment_variables,
             explanation: explanation.to_string(),
         };
-        match self.deploy(call).await? {
+        match deploy(&self.pool, call).await? {
             Ok(DeployReturn::AuthConfig(c)) => Ok(c),
             Ok(other) => anyhow::bail!("worker returned {} for auth config", other.kind_name()),
             Err(js) => anyhow::bail!("unexpected JsError from auth config: {js}"),
@@ -523,13 +527,24 @@ pub(crate) enum Terminal {
 }
 
 struct AttemptFailure {
-    stage: FailureStage,
+    delivery: Delivery,
     error: anyhow::Error,
 }
 
-/// Runs `request` on a worker, retrying on other workers only when
-/// `may_retry` allows it. Each attempt gets `run_timeout`; the gRPC deadline
-/// alone only bounds the response headers, which the worker sends at once.
+// ponytail: a refused run waits with jittered backoff inside one request;
+// the upgrade path is a conductor-side per-pool semaphore sized to the total
+// worker capacity, so requests queue instead of polling.
+const REFUSED_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
+const REFUSED_BACKOFF_MAX: Duration = Duration::from_secs(2);
+/// Total time a request may spend backing off after refusals.
+const REFUSED_WAIT_BUDGET: Duration = Duration::from_secs(30);
+
+/// Runs `up` on a worker, retrying on other workers only when `may_retry`
+/// allows it. A refusal (`Overloaded` before `Started`) never ran anything,
+/// so it retries with backoff for up to `REFUSED_WAIT_BUDGET` (bounded by
+/// `run_timeout`) without using up the attempt cap. Each attempt gets
+/// `run_timeout`; the gRPC deadline alone only bounds the response headers,
+/// which the worker sends at once.
 pub(crate) async fn execute_with_retries(
     pool: &Arc<WorkerPool>,
     affinity: &str,
@@ -544,6 +559,8 @@ pub(crate) async fn execute_with_retries(
         AsciiMetadataValue::try_from(affinity).context("module path is not a valid header")?;
     let mut exclude = BTreeSet::new();
     let mut attempt = 0;
+    let refused_deadline = tokio::time::Instant::now() + REFUSED_WAIT_BUDGET.min(run_timeout);
+    let mut backoff = REFUSED_BACKOFF_INITIAL;
     loop {
         // Once every worker is excluded, fall back to all of them: in proxy
         // mode the only address is a load balancer.
@@ -561,7 +578,6 @@ pub(crate) async fn execute_with_retries(
             run_timeout,
             execute_once(
                 client,
-                kind,
                 module_header.clone(),
                 up.clone(),
                 log_line_sender,
@@ -583,16 +599,30 @@ pub(crate) async fn execute_with_retries(
             Ok(result) => return Ok(result),
             Err(failure) => failure,
         };
-        if !may_retry(kind, failure.stage, attempt, *FUNRUN_CLIENT_MAX_RETRIES) {
-            return Err(failure.error);
+        let stage = failure_stage(kind, failure.delivery);
+        match failure.delivery {
+            Delivery::Refused => {
+                // ±50% jitter so refused requests do not retry in lockstep.
+                let delay = backoff.mul_f64(rand::random_range(0.5..1.5));
+                if tokio::time::Instant::now() + delay > refused_deadline {
+                    return Err(failure.error);
+                }
+                tracing::debug!("funrun worker {addr} refused {kind:?} in {affinity}; retrying");
+                tokio::time::sleep(delay).await;
+                backoff = (backoff * 2).min(REFUSED_BACKOFF_MAX);
+            },
+            Delivery::NotSent | Delivery::LostBeforeStarted | Delivery::LostAfterStarted => {
+                if !may_retry(kind, stage, attempt, *FUNRUN_CLIENT_MAX_RETRIES) {
+                    return Err(failure.error);
+                }
+                tracing::warn!(
+                    "retrying {kind:?} in {affinity}: funrun worker {addr} failed {stage:?}: {:#}",
+                    failure.error
+                );
+                attempt += 1;
+            },
         }
-        tracing::warn!(
-            "retrying {kind:?} in {affinity}: funrun worker {addr} failed {:?}: {:#}",
-            failure.stage,
-            failure.error
-        );
         exclude.insert(addr);
-        attempt += 1;
     }
 }
 
@@ -600,7 +630,6 @@ pub(crate) async fn execute_with_retries(
 /// the retry policy.
 async fn execute_once(
     mut client: FunrunChannel,
-    kind: RequestKind,
     module: AsciiMetadataValue,
     up: Up,
     log_line_sender: Option<&mpsc::UnboundedSender<LogLine>>,
@@ -620,7 +649,7 @@ async fn execute_once(
         // The worker never received the request: it is not sent yet.
         Err(status) if is_transport_failure(&status) => {
             return Ok(Err(AttemptFailure {
-                stage: failure_stage(kind, Delivery::NotSent),
+                delivery: Delivery::NotSent,
                 error: status.into_anyhow(),
             }));
         },
@@ -631,7 +660,7 @@ async fn execute_once(
     // handed to it, so nothing was sent.
     if up_tx.send(request).await.is_err() {
         return Ok(Err(AttemptFailure {
-            stage: failure_stage(kind, Delivery::NotSent),
+            delivery: Delivery::NotSent,
             error: anyhow::anyhow!("funrun Execute stream closed before the request was sent"),
         }));
     }
@@ -660,14 +689,14 @@ async fn execute_once(
                 let inner = match frame {
                     Err(status) if is_transport_failure(&status) => {
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(kind, lost(started)),
+                            delivery: lost(started),
                             error: status.into_anyhow(),
                         }));
                     },
                     Err(status) => return Err(status.into_anyhow()),
                     Ok(None) => {
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(kind, lost(started)),
+                            delivery: lost(started),
                             error: anyhow::anyhow!("funrun Execute stream ended without a result"),
                         }));
                     },
@@ -709,7 +738,7 @@ async fn execute_once(
                         };
                         let error = ErrorMetadata::overloaded("FunrunWorkerOverloaded", reason);
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(kind, delivery),
+                            delivery,
                             error: error.into(),
                         }));
                     },
@@ -1002,6 +1031,8 @@ mod tests {
     use bytes::Bytes;
     use common::{
         auth::AuthConfig,
+        errors::JsError,
+        runtime::UnixTimestamp,
         types::UdfType,
     };
     use errors::ErrorMetadataAnyhowExt;
@@ -1010,7 +1041,10 @@ mod tests {
         DeployReturn,
     };
     use futures::StreamExt;
-    use model::modules::module_versions::ModuleSource;
+    use model::{
+        modules::module_versions::ModuleSource,
+        udf_config::types::UdfConfig,
+    };
     use pb_funrun::funrun::{
         deploy_result,
         execute_down::Inner as Down,
@@ -1096,6 +1130,36 @@ mod tests {
         .await?;
         assert!(matches!(terminal, Terminal::Deploy(_)));
         assert!(matches!(*fake.last_request.lock(), Some(Up::Deploy(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn analyze_js_error_comes_back_as_a_user_error() -> anyhow::Result<()> {
+        // What a push with a syntax error sees: the worker's JsError is the
+        // `Err(JsError)` value, as in process, not an internal error.
+        let (addr, _fake) = start_fake_worker(move |_| {
+            let js = JsError::from_message("Uncaught SyntaxError: bad".into());
+            Ok(vec![Step::Send(down(Down::DeployResult(DeployResult {
+                result: Some(deploy_result::Result::JsError(js.try_into().unwrap())),
+            })))])
+        })
+        .await;
+        let pool = pool_of(&[&addr]);
+        let call = DeployCall::Analyze {
+            udf_config: UdfConfig {
+                server_version: "1.0.0".parse()?,
+                import_phase_rng_seed: [0; 32],
+                import_phase_unix_timestamp: UnixTimestamp::from_millis(0),
+            },
+            modules: BTreeMap::new(),
+            environment_variables: BTreeMap::new(),
+        };
+
+        let Err(js) = super::deploy(&pool, call).await? else {
+            anyhow::bail!("analyze should return the JsError");
+        };
+
+        assert_eq!(js.message, "Uncaught SyntaxError: bad");
         Ok(())
     }
 
@@ -1238,6 +1302,27 @@ mod tests {
         assert_eq!(result, RunResult::default());
         assert_eq!(busy_calls.load(Ordering::SeqCst), 1);
         assert_eq!(idle_calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn overloaded_six_times_then_succeeds(call: usize) -> Result<Vec<Step>, Status> {
+        if call < 6 {
+            overloaded(call)
+        } else {
+            succeeds(call)
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_action_backs_off_past_the_attempt_cap() {
+        // One worker that is full for longer than the attempt cap (5 calls)
+        // allows: refusals back off and keep trying instead.
+        let (addr, calls) = start_fake(overloaded_six_times_then_succeeds).await;
+        let pool = pool_of(&[&addr]);
+
+        let result = run(&pool, "m.js", UdfType::Action).await.unwrap();
+
+        assert_eq!(result, RunResult::default());
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 
     #[tokio::test]
