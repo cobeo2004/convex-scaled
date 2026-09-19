@@ -79,6 +79,11 @@ jobs:
           cache: true
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # mise doesn't install pnpm; without it run.sh falls back to npm and
+      # ignores the e2e pnpm-lock.yaml. Pin matches npm-packages/package.json.
+      - name: Install pnpm
+        run: npm install -g pnpm@11.15.1
+
       - name: Unit tests for fork crates
         run: cargo test -p pb_funrun -p funrun_proto -p function_host -p funrun_worker -p remote_function_runner
 
