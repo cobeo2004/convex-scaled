@@ -170,6 +170,10 @@ impl IndexReader for RemoteIndexReader {
                     max_results - page.entries.len(),
                 )
                 .await?;
+            anyhow::ensure!(
+                !more.entries.is_empty(),
+                "IndexPage returned no entries with a cursor"
+            );
             page.entries.extend(more.entries);
             page.cursor = more.cursor;
         }

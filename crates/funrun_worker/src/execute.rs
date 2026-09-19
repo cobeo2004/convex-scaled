@@ -309,7 +309,10 @@ impl FunrunService {
                     }
                     let (transaction, outcome, usage) = match result {
                         Ok(run) => run,
-                        Err(e) => return send(tx, run_error_to_down(e)?).await,
+                        // Overloaded only replaces Started: a nested UDF rejected
+                        // after Started is a plain failure.
+                        Err(e) if started_pending => return send(tx, run_error_to_down(e)?).await,
+                        Err(e) => return Err(Status::from_anyhow(e)),
                     };
                     let result = run_result_to_proto(transaction, outcome, usage)
                         .map_err(Status::from_anyhow)?;

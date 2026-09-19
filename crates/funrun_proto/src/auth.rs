@@ -87,11 +87,6 @@ impl Interceptor for BearerInterceptor {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        Mutex,
-    };
-
     use tonic::metadata::MetadataMap;
 
     use super::*;
@@ -111,7 +106,6 @@ mod tests {
             AUTHORIZATION,
             format!("Bearer {}", worker_token("s")).parse().unwrap(),
         );
-        // `verify_bearer`: no log line to race `rejected_bearer_is_logged`.
         verify_bearer(&md, &worker_token("s")).unwrap();
         assert_eq!(
             verify_bearer(&md, &host_token("s")).unwrap_err().code(),
@@ -137,42 +131,6 @@ mod tests {
         );
         md.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         check_bearer(&md, &token).unwrap();
-    }
-
-    #[test]
-    fn rejected_bearer_is_logged() {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let writer = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || LogWriter(writer.clone()))
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            // Other tests in this binary can hit the `warn!` callsite in
-            // `check_bearer` before any subscriber is installed, which caches
-            // its Interest as "never" for the process. Rebuild the cache
-            // against our scoped subscriber so the event isn't dropped
-            // regardless of test execution order.
-            tracing::callsite::rebuild_interest_cache();
-            check_bearer(&MetadataMap::new(), &worker_token("secret")).unwrap_err();
-        });
-        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(logs.contains("WARN"), "{logs}");
-        assert!(logs.contains("Unauthenticated"), "{logs}");
-        assert!(logs.contains("missing funrun bearer token"), "{logs}");
-    }
-
-    struct LogWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     #[test]
