@@ -16,6 +16,9 @@ env:
 jobs:
   build:
     name: Build Convex Backend
+    # Needs Convex's own AWS runners; forks have none, so the job would queue
+    # forever. Skipped outside upstream.
+    if: github.repository == 'get-convex/convex-backend'
     runs-on: [self-hosted, aws, x64, xlarge]
 
     steps:
