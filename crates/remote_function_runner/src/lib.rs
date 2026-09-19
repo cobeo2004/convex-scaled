@@ -148,9 +148,12 @@ use crate::{
 };
 
 pub mod metrics;
+mod node;
 pub mod pick;
 pub mod pool;
 pub mod retry;
+
+pub use crate::node::RemoteNodeExecutor;
 
 pub struct RemoteFunctionRunner<RT: Runtime> {
     pool: Arc<WorkerPool>,
@@ -515,7 +518,6 @@ type BodyStream = BoxStream<'static, anyhow::Result<Bytes>>;
 pub(crate) enum Terminal {
     Run(RunResult),
     Deploy(DeployResult),
-    #[expect(dead_code, reason = "read once Node actions run on workers")]
     Node(NodeResult),
 }
 
