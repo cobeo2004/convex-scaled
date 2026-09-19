@@ -108,6 +108,33 @@ fn watch_load_without_token_is_rejected() {
     });
 }
 
+/// Proxy mode has no WatchLoad, so this header is the only version check a
+/// worker gets from a conductor on another build.
+#[test]
+fn calls_without_protocol_version_are_rejected() {
+    with_worker(|addr, _| async move {
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let bearer: tonic::metadata::MetadataValue<_> =
+            format!("Bearer {}", worker_token(SECRET)).parse().unwrap();
+        let mut client =
+            FunrunClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+                req.metadata_mut().insert("authorization", bearer.clone());
+                Ok(req)
+            });
+        let err = client
+            .execute(tokio_stream::iter(vec![request_frame()]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        let err = client.watch_load(WatchLoadRequest {}).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    });
+}
+
 #[test]
 fn first_frame_must_be_request() {
     with_worker(|addr, _| async move {

@@ -37,7 +37,10 @@ use function_runner::server::{
     RunRequestArgs,
 };
 use funrun_proto::{
-    auth::check_bearer,
+    auth::{
+        check_bearer,
+        check_protocol,
+    },
     http::response_part_to_down,
     request::run_request_from_proto,
     transaction::run_result_to_proto,
@@ -407,6 +410,7 @@ impl Funrun for FunrunService {
         request: Request<Streaming<ExecuteUp>>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
         check_bearer(request.metadata(), &self.token)?;
+        check_protocol(request.metadata())?;
         let (tx, rx) = mpsc::channel(32);
         let this = self.clone();
         // Framing errors go down the stream, so the response headers never
@@ -425,6 +429,7 @@ impl Funrun for FunrunService {
         request: Request<WatchLoadRequest>,
     ) -> Result<Response<Self::WatchLoadStream>, Status> {
         check_bearer(request.metadata(), &self.token)?;
+        check_protocol(request.metadata())?;
         let (tx, rx) = mpsc::channel(1);
         let in_flight = self.in_flight.clone();
         let mut draining = self.draining.subscribe();
@@ -432,7 +437,8 @@ impl Funrun for FunrunService {
             let targets = LoadTargets::from_knobs();
             let mut sampler = CpuSampler::new();
             let mut interval = tokio::time::interval(LOAD_REPORT_INTERVAL);
-            // A slow client or sample must not cause a burst of catch-up reports.
+            // A slow client or sample must not cause a burst of catch-up
+            // reports.
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
