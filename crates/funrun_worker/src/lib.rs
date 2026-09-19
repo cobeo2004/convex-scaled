@@ -1,10 +1,7 @@
 //! Stateless remote function runner worker. It has no database: reads and
 //! action callbacks go back to the conductor's `function_host` over gRPC.
 
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::sync::Arc;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -112,7 +109,7 @@ impl<RT: Runtime> StorageForDeployment<RT> for WorkerStorage {
 }
 
 /// Serves `Funrun` until SIGTERM/ctrl-c, then stops accepting and waits up to
-/// `BACKEND_REQUEST_DRAIN_TIMEOUT` for in-flight runs to finish.
+/// `BACKEND_REQUEST_DRAIN_TIMEOUT` for in-flight runs to send their results.
 pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result<()> {
     let host = connect_host(
         &config.function_host_url,
@@ -145,20 +142,17 @@ pub async fn run_worker(rt: ProdRuntime, config: WorkerConfig) -> anyhow::Result
         "Shutting down, draining {} in-flight functions",
         service.in_flight()
     );
+    // Ends WatchLoad first: the conductor stops routing here at once, and the
+    // graceful server shutdown below does not wait on those endless streams.
+    service.start_draining();
     let _ = shutdown_tx.send(());
-    let drain = async {
-        while service.in_flight() > 0 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    };
-    if tokio::time::timeout(*BACKEND_REQUEST_DRAIN_TIMEOUT, drain)
-        .await
-        .is_err()
-    {
-        tracing::warn!(
+    // The server finishes once every Execute stream has sent its last frame.
+    match tokio::time::timeout(*BACKEND_REQUEST_DRAIN_TIMEOUT, &mut server).await {
+        Ok(result) => result??,
+        Err(_) => tracing::warn!(
             "Drain timed out with {} functions still in flight",
             service.in_flight()
-        );
+        ),
     }
     service.shutdown().await
 }

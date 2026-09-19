@@ -77,6 +77,7 @@ use runtime::prod::ProdRuntime;
 use tokio::sync::{
     mpsc,
     oneshot,
+    watch,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -124,6 +125,7 @@ pub struct FunrunService {
     instance_name: String,
     token: String,
     in_flight: Arc<AtomicUsize>,
+    draining: Arc<watch::Sender<bool>>,
 }
 
 impl FunrunService {
@@ -169,7 +171,14 @@ impl FunrunService {
             instance_name: instance_name.to_string(),
             token: funrun_proto::auth::worker_token(instance_secret),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            draining: Arc::new(watch::Sender::new(false)),
         })
+    }
+
+    /// Ends every `WatchLoad` stream, now and later, so the conductor marks
+    /// this worker unhealthy and stops sending it work while it drains.
+    pub fn start_draining(&self) {
+        self.draining.send_replace(true);
     }
 
     pub fn in_flight(&self) -> usize {
@@ -415,6 +424,7 @@ impl Funrun for FunrunService {
         check_bearer(request.metadata(), &self.token)?;
         let (tx, rx) = mpsc::channel(1);
         let in_flight = self.in_flight.clone();
+        let mut draining = self.draining.subscribe();
         tokio_spawn("funrun_watch_load", async move {
             let targets = LoadTargets::from_knobs();
             let mut sampler = CpuSampler::new();
@@ -422,7 +432,11 @@ impl Funrun for FunrunService {
             // A slow client or sample must not cause a burst of catch-up reports.
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {},
+                    // Dropping `tx` ends the stream.
+                    _ = draining.wait_for(|draining| *draining) => return,
+                }
                 // The only place CpuSampler runs: its /proc reads block.
                 let cpu = sampler.sample();
                 let in_flight = in_flight.load(Ordering::SeqCst);

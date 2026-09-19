@@ -85,6 +85,8 @@ services:
       FUNRUN_LISTEN: 0.0.0.0:7400
       FUNRUN_METRICS_LISTEN: 0.0.0.0:9100
     depends_on: [conductor]
+    # > BACKEND_REQUEST_DRAIN_TIMEOUT (15 s): SIGKILL must not cut a drain short.
+    stop_grace_period: 30s
     deploy: { resources: { limits: { cpus: "${WORKER_CPUS:-4}" } } }
 
   envoy:

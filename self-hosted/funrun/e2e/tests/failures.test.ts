@@ -79,8 +79,9 @@ describe.runIf(process.env.FUNCTION_RUNNER === "remote")("funrun failures", () =
     expect(await counter(marker)).toBe(1);
   }, 120_000);
 
-  test("graceful rolling restart under load: zero failed calls", async () => {
+  test("graceful rolling restart under load: zero failed calls, actions drain", async () => {
     const name = `roll-${run}`;
+    const actions: { marker: string; done: Promise<boolean> }[] = [];
     let stop = false;
     let writes = 0;
     const failures: string[] = [];
@@ -99,6 +100,11 @@ describe.runIf(process.env.FUNCTION_RUNNER === "remote")("funrun failures", () =
     await sleep(1_000);
     // One replica at a time, so at least one worker is always up.
     for (const id of await workers()) {
+      // A long action in flight while a replica drains: whichever worker
+      // runs it, it must finish (drain flushes its result) and run once.
+      const marker = `roll-action-${run}-${actions.length}`;
+      actions.push({ marker, done: http.action(api.actions.markedBurn, { marker, ms: 3_000 }) });
+      await expect.poll(() => counter(marker), { timeout: 10_000 }).toBe(1);
       await sh(`docker stop -t 30 ${id}`);
       await sleep(1_000);
       await sh(`docker start ${id}`);
@@ -110,6 +116,10 @@ describe.runIf(process.env.FUNCTION_RUNNER === "remote")("funrun failures", () =
     expect(failures).toEqual([]);
     expect(writes).toBeGreaterThan(0);
     expect(await counter(name)).toBe(writes);
+    for (const { marker, done } of actions) {
+      await expect(done).resolves.toBe(true);
+      expect(await counter(marker)).toBe(1);
+    }
   }, 120_000);
 
   test("no workers -> Overloaded", async () => {

@@ -38,7 +38,7 @@ const SECRET: &str = "4361726e697461732c206c69746572616c6c79206d65616e696e672022
 
 fn with_worker<F, Fut>(test: F)
 where
-    F: FnOnce(SocketAddr) -> Fut,
+    F: FnOnce(SocketAddr, FunrunService) -> Fut,
     Fut: Future<Output = ()>,
 {
     let tokio = ProdRuntime::init_tokio().unwrap();
@@ -49,7 +49,7 @@ where
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = socket.local_addr().unwrap();
-        tokio::spawn(service.serve(socket, std::future::pending()));
+        tokio::spawn(service.clone().serve(socket, std::future::pending()));
         tokio::time::timeout(Duration::from_secs(5), async {
             while TcpStream::connect(addr).await.is_err() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -57,7 +57,7 @@ where
         })
         .await
         .unwrap();
-        test(addr).await;
+        test(addr, service).await;
     });
 }
 
@@ -85,7 +85,7 @@ fn request_frame() -> ExecuteUp {
 
 #[test]
 fn execute_without_token_is_rejected() {
-    with_worker(|addr| async move {
+    with_worker(|addr, _| async move {
         let mut client = FunrunClient::connect(format!("http://{addr}"))
             .await
             .unwrap();
@@ -99,7 +99,7 @@ fn execute_without_token_is_rejected() {
 
 #[test]
 fn watch_load_without_token_is_rejected() {
-    with_worker(|addr| async move {
+    with_worker(|addr, _| async move {
         let mut client = FunrunClient::connect(format!("http://{addr}"))
             .await
             .unwrap();
@@ -110,7 +110,7 @@ fn watch_load_without_token_is_rejected() {
 
 #[test]
 fn first_frame_must_be_request() {
-    with_worker(|addr| async move {
+    with_worker(|addr, _| async move {
         let mut client = authed_client(addr).await;
         let body_first = ExecuteUp {
             inner: Some(execute_up::Inner::HttpRequestBody(BodyChunk {
@@ -130,7 +130,7 @@ fn first_frame_must_be_request() {
 
 #[test]
 fn undecodable_request_is_invalid_argument() {
-    with_worker(|addr| async move {
+    with_worker(|addr, _| async move {
         let mut client = authed_client(addr).await;
         let mut down = client
             .execute(tokio_stream::iter(vec![request_frame()]))
@@ -144,7 +144,7 @@ fn undecodable_request_is_invalid_argument() {
 
 #[test]
 fn watch_load_emits_reports() {
-    with_worker(|addr| async move {
+    with_worker(|addr, _| async move {
         let mut client = authed_client(addr).await;
         let mut stream = client
             .watch_load(WatchLoadRequest {})
@@ -158,5 +158,28 @@ fn watch_load_emits_reports() {
             report.protocol_version,
             funrun_proto::FUNRUN_PROTOCOL_VERSION
         );
+    });
+}
+
+#[test]
+fn draining_ends_watch_load_streams() {
+    with_worker(|addr, service| async move {
+        let mut client = authed_client(addr).await;
+        let mut stream = client
+            .watch_load(WatchLoadRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        stream.message().await.unwrap().unwrap();
+        service.start_draining();
+        // The conductor sees the stream end and marks the worker unhealthy.
+        let end = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if stream.message().await.unwrap().is_none() {
+                    return;
+                }
+            }
+        });
+        end.await.expect("WatchLoad should end once draining");
     });
 }
