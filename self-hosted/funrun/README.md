@@ -1,8 +1,9 @@
 # funrun compose stack
 
 Conductor (`convex-local-backend`, `FUNCTION_RUNNER=remote`) + N stateless
-`funrun_worker`s + Postgres + RustFS (S3-compatible, replaces MinIO) + an
-optional Envoy proxy for `FUNRUN_ROUTING=proxy`.
+`funrun_worker`s + Postgres + RustFS (S3-compatible, replaces MinIO) + the
+Convex dashboard on http://127.0.0.1:6791 (log in with the admin key below) +
+an optional Envoy proxy for `FUNRUN_ROUTING=proxy`.
 
 ## Run it
 

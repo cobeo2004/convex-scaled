@@ -44,6 +44,65 @@ Convex. Check out our [self-hosting guide](./self-hosted/README.md) for detailed
 instructions. Community support for self-hosting is available in the
 `#self-hosted` channel on [Discord](https://discord.gg/convex).
 
+## Scaled self-hosting: remote function runner
+
+This fork can run Convex functions on a pool of stateless worker processes
+instead of inside the backend. The backend becomes the **conductor**: it
+keeps the sync engine, the lease, OCC, commits and every index read, exactly
+as upstream. Only `run_function` moves out of the process, so V8 execution
+scales horizontally while the core of Convex stays unchanged.
+`FUNCTION_RUNNER=local` (the default) keeps the upstream in-process behaviour.
+
+![Convex scaled architecture](self-hosted/funrun/docs/architecture.png)
+
+- **Conductor** (`crates/local_backend`): upstream `local_backend`, plus the
+  `RemoteFunctionRunner` (`crates/remote_function_runner`), which picks a
+  worker by module affinity and reported load, and retries safely. It also
+  runs the `FunctionHost` gRPC service (`crates/function_host`) that workers
+  call back for index pages, text search and action callbacks.
+- **Workers** (`crates/funrun_worker`): run upstream's `FunctionRunnerCore` in
+  V8. They hold no state; modules and files come from S3 (RustFS in the
+  Compose stack). Workers are found by DNS (`FUNRUN_ROUTING=direct`) or
+  behind one Envoy address (`FUNRUN_ROUTING=proxy`).
+- **Wire protocol** (`crates/pb_funrun`, `crates/funrun_proto`): one
+  bidirectional `Execute` stream per run. Bearer tokens are derived from
+  `INSTANCE_SECRET`, one per direction, and the protocol version is checked
+  both ways.
+
+### How a mutation runs
+
+![Remote mutation flow](self-hosted/funrun/docs/mutation-flow.png)
+
+1. The conductor picks a read timestamp and sends a `RunRequest` to a worker
+   over an `Execute` stream.
+2. The worker runs the function in V8. Every index read goes back to the
+   conductor's `FunctionHost` as an `IndexPage` at that timestamp. Pages are
+   cut at a byte budget and refilled by the worker, so the read set records
+   exactly what was read.
+3. The worker returns the writes and the read set, and the conductor commits
+   them with upstream's OCC check. A conflict retries the mutation, just as
+   in process.
+
+Retries: queries and mutations are retried on transport failures. An action
+or HTTP action is retried only if the worker never received it or refused it
+before starting, so it never runs twice. A run that reaches its timeout is
+not retried.
+
+### Try it
+
+```sh
+cd self-hosted/funrun
+export INSTANCE_SECRET=$(openssl rand -hex 32)
+docker compose up -d --build --scale worker=2
+docker compose exec conductor ./generate_admin_key.sh   # dashboard login
+open http://127.0.0.1:6791                              # dashboard
+```
+
+See [`self-hosted/funrun/README.md`](self-hosted/funrun/README.md) for
+configuration, the local-vs-remote e2e suite, failure tests and benchmarks.
+The diagrams are generated with [archify](https://github.com/tt-a1i/archify)
+from `self-hosted/funrun/docs/*.json`.
+
 ## Community & Support
 
 - Join our [Discord community](https://discord.gg/convex) for help and

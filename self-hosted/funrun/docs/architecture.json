@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Convex Scaled Architecture",
+    "output": "self-hosted/funrun/docs/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "Convex Clients",
+      "sublabel": "SDK · HTTP actions",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        140,
+        62
+      ]
+    },
+    {
+      "id": "dashboard",
+      "type": "frontend",
+      "label": "Dashboard",
+      "sublabel": ":6791",
+      "pos": [
+        40,
+        470
+      ],
+      "size": [
+        140,
+        62
+      ]
+    },
+    {
+      "id": "conductor",
+      "type": "backend",
+      "label": "Conductor",
+      "sublabel": "sync · OCC · commits",
+      "pos": [
+        270,
+        280
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": ":3210 / :3211"
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "RemoteFunctionRunner",
+      "sublabel": "pick · retry · timeout",
+      "pos": [
+        500,
+        160
+      ],
+      "size": [
+        180,
+        62
+      ]
+    },
+    {
+      "id": "host",
+      "type": "backend",
+      "label": "FunctionHost",
+      "sublabel": "gRPC :7401",
+      "pos": [
+        500,
+        400
+      ],
+      "size": [
+        180,
+        62
+      ]
+    },
+    {
+      "id": "envoy",
+      "type": "cloud",
+      "label": "Envoy",
+      "sublabel": "proxy mode only",
+      "pos": [
+        770,
+        40
+      ],
+      "size": [
+        140,
+        62
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "funrun_worker × N",
+      "sublabel": "V8 isolates · :7400",
+      "pos": [
+        1000,
+        280
+      ],
+      "size": [
+        180,
+        70
+      ],
+      "tag": "stateless"
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "documents · indexes",
+      "pos": [
+        270,
+        560
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "rustfs",
+      "type": "database",
+      "label": "RustFS (S3)",
+      "sublabel": "modules · files",
+      "pos": [
+        1000,
+        560
+      ],
+      "size": [
+        180,
+        62
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "conductor process (upstream local_backend)",
+      "wraps": [
+        "conductor",
+        "runner",
+        "host"
+      ],
+      "pad": 18
+    },
+    {
+      "kind": "region",
+      "label": "scale out",
+      "wraps": [
+        "workers"
+      ],
+      "pad": 18
+    }
+  ],
+  "connections": [
+    {
+      "from": "clients",
+      "to": "conductor",
+      "label": "WebSocket · HTTP",
+      "variant": "emphasis"
+    },
+    {
+      "from": "dashboard",
+      "to": "conductor",
+      "label": "admin API"
+    },
+    {
+      "from": "conductor",
+      "to": "runner",
+      "label": "run_function"
+    },
+    {
+      "from": "runner",
+      "to": "workers",
+      "label": "Execute stream",
+      "variant": "emphasis"
+    },
+    {
+      "from": "runner",
+      "to": "envoy",
+      "label": "proxy",
+      "variant": "dashed"
+    },
+    {
+      "from": "envoy",
+      "to": "workers",
+      "variant": "dashed"
+    },
+    {
+      "from": "workers",
+      "to": "host",
+      "label": "IndexPage · callbacks",
+      "variant": "security"
+    },
+    {
+      "from": "conductor",
+      "to": "postgres",
+      "label": "commit · read",
+      "labelAt": [
+        345,
+        455
+      ]
+    },
+    {
+      "from": "workers",
+      "to": "rustfs",
+      "label": "load modules",
+      "labelAt": [
+        1090,
+        455
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Conductor keeps the core",
+      "items": [
+        "Lease, OCC, commits and every index read stay in upstream local_backend",
+        "Only run_function leaves the process",
+        "FUNCTION_RUNNER=local runs it all in process, unchanged"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Workers scale out",
+      "items": [
+        "Stateless: modules come from S3, reads from FunctionHost",
+        "Picked by module affinity and reported load (WatchLoad)",
+        "Direct DNS routing, or one address behind Envoy"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Safety",
+      "items": [
+        "Per-direction bearer tokens derived from INSTANCE_SECRET",
+        "Protocol version checked both ways",
+        "An action is retried only if it provably never started"
+      ]
+    }
+  ]
+}
