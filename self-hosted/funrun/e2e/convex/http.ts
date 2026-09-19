@@ -1,5 +1,5 @@
 import { httpRouter } from "convex/server";
-import { httpAction } from "./_generated/server";
+import { httpAction, query } from "./_generated/server";
 
 const http = httpRouter();
 http.route({
@@ -17,4 +17,7 @@ http.route({
     return new Response(body);
   }),
 });
+// load_generator's RunHttpAction resolves paths against this.
+export const siteUrl = query({ args: {}, handler: async () => process.env.CONVEX_SITE_URL });
+
 export default http;

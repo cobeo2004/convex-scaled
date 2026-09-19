@@ -49,3 +49,14 @@ export const scheduledWrite = internalMutation({
   args: { author: v.string() },
   handler: async (ctx, { author }) => { await ctx.db.insert("messages", { author, body: "scheduled" }); },
 });
+
+// ~20 ms of math so the bench reaches CPU limits. An iteration count, not a
+// wall-clock loop: Date.now() is frozen inside queries.
+export const cpuQuery = query({
+  args: { cacheBreaker: v.optional(v.number()) },
+  handler: async () => {
+    let x = 0;
+    for (let i = 0; i < 2_300_000; i++) x += Math.sqrt(x + i);
+    return x > 0;
+  },
+});
