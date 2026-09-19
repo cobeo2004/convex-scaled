@@ -19,7 +19,14 @@ pub fn down_to_response_part(down: ExecuteDown) -> anyhow::Result<Option<HttpAct
         Some(Inner::HttpResponseBody(bytes)) => {
             Some(HttpActionResponsePart::BodyChunk(bytes.into()))
         },
-        Some(Inner::Started(_) | Inner::LogLine(_) | Inner::Result(_) | Inner::Overloaded(_))
+        Some(
+            Inner::Started(_)
+            | Inner::LogLine(_)
+            | Inner::Result(_)
+            | Inner::Overloaded(_)
+            | Inner::DeployResult(_)
+            | Inner::NodeResult(_),
+        )
         | None => None,
     })
 }

@@ -8,10 +8,11 @@ use std::{
 /// drops unknown fields, so mixed builds would otherwise lose data silently
 /// (e.g. read-set intervals) instead of failing. Workers report it in
 /// `LoadReport` and send it as `x-funrun-protocol` on `FunctionHost` calls.
-pub const FUNRUN_PROTOCOL_VERSION: u32 = 1;
+pub const FUNRUN_PROTOCOL_VERSION: u32 = 2;
 
 pub mod auth;
 pub mod callbacks;
+pub mod deploy;
 pub mod http;
 pub mod ids;
 pub mod index_page;

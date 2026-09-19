@@ -4157,6 +4157,7 @@ dependencies = [
  "pb_funrun",
  "prost 0.14.3",
  "search",
+ "serde",
  "serde_json",
  "tonic",
  "tracing",

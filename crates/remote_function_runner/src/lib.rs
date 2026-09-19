@@ -562,6 +562,9 @@ async fn execute_once(
                         }));
                     },
                     Down::Result(result) => return Ok(Ok(result)),
+                    Down::DeployResult(_) | Down::NodeResult(_) => {
+                        anyhow::bail!("unexpected frame")
+                    },
                 }
             },
             Some(()) = OptionFuture::from(pump.as_mut()) => pump = None,

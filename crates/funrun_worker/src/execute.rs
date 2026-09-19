@@ -406,7 +406,7 @@ fn body_stream(up: Streaming<ExecuteUp>) -> BoxStream<'static, anyhow::Result<By
                 inner: Some(Up::HttpRequestBody(BodyChunk { data, end })),
             }) => Ok(Some((Bytes::from(data), (!end).then_some(up)))),
             Some(ExecuteUp {
-                inner: Some(Up::Request(_)) | None,
+                inner: Some(Up::Request(_) | Up::Deploy(_) | Up::Node(_)) | None,
             }) => anyhow::bail!("expected an HTTP request body frame"),
             None => anyhow::bail!("Execute stream ended before the request body did"),
         }
