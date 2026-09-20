@@ -10,6 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export INSTANCE_SECRET=${INSTANCE_SECRET:-$(openssl rand -hex 32)}
 if command -v pnpm >/dev/null; then pm=pnpm; else pm=npm; fi
+host_ip=$(ipconfig getifaddr en0 2>/dev/null || ip route get 1 2>/dev/null | awk '{print $7; exit}')
+[[ -n ${host_ip:-} ]] || { echo "cannot determine this host's address (needed by the node config)" >&2; exit 1; }
 $pm install --silent
 
 compose() { (cd .. && docker compose --profile proxy --profile node "$@"); }
@@ -21,7 +23,10 @@ for cfg in ${@:-local direct proxy node}; do
     local)  export FUNCTION_RUNNER=local FUNRUN_ROUTING=direct FUNRUN_WORKERS=worker:7400 FUNRUN_NODE_WORKERS= ;;
     direct) export FUNCTION_RUNNER=remote FUNRUN_ROUTING=direct FUNRUN_WORKERS=worker:7400 FUNRUN_NODE_WORKERS= ;;
     proxy)  export FUNCTION_RUNNER=remote FUNRUN_ROUTING=proxy FUNRUN_WORKERS=envoy:7400 FUNRUN_NODE_WORKERS= ;;
-    node)   export FUNCTION_RUNNER=remote FUNRUN_ROUTING=direct FUNRUN_WORKERS=worker:7400 FUNRUN_NODE_WORKERS=node-worker:7400 ;;
+    # ctx.storage in a "use node" action fetches URLs built from CONVEX_CLOUD_ORIGIN,
+    # so it has to resolve on the node worker too, not just on the host. The host's
+    # own address does both, via the published conductor port.
+    node)   export FUNCTION_RUNNER=remote FUNRUN_ROUTING=direct FUNRUN_WORKERS=worker:7400 FUNRUN_NODE_WORKERS=node-worker:7400 CONVEX_CLOUD_ORIGIN=http://$host_ip:3210 ;;
     *) echo "unknown config $cfg" >&2; exit 2 ;;
   esac
   echo "=== $cfg: FUNCTION_RUNNER=$FUNCTION_RUNNER FUNRUN_ROUTING=$FUNRUN_ROUTING FUNRUN_WORKERS=$FUNRUN_WORKERS FUNRUN_NODE_WORKERS=$FUNRUN_NODE_WORKERS ==="
@@ -29,7 +34,8 @@ for cfg in ${@:-local direct proxy node}; do
   extra=()
   [[ $cfg == proxy ]] && extra+=(envoy)
   [[ $cfg == node ]] && extra+=(node-worker)
-  compose up -d --wait --scale worker=2 conductor worker "${extra[@]}"
+  # bash 3.2 (macOS) treats "${extra[@]}" on an empty array as unbound under set -u.
+  compose up -d --wait --scale worker=2 conductor worker ${extra[@]+"${extra[@]}"}
   admin_key=$(compose exec -T conductor ./generate_admin_key.sh | tail -1)
   CONVEX_SELF_HOSTED_URL=http://127.0.0.1:3210 CONVEX_SELF_HOSTED_ADMIN_KEY=$admin_key npx convex deploy --yes
   # Where did the user code run? Isolate threads log "Created <pool> isolate worker <n>".
@@ -76,7 +82,8 @@ for cfg in ${@:-local direct proxy node}; do
     sleep 2
     unset EXPECT_NODE_HOST_PREFIX
     $pm test tests/node.test.ts
-    fallback=$(curl -s localhost:9101/metrics | grep 'funrun_fallback_total{kind="node"}' | awk '{print $NF}')
+    # The exporter prefixes every metric with convex_local_backend_.
+    fallback=$(curl -s localhost:9101/metrics | awk '/funrun_fallback_total\{kind="node"\}/ {print $NF}')
     if [[ -z ${fallback:-} || ! $fallback =~ ^[0-9]+$ || $fallback -lt 1 ]]; then
       echo "FAIL: funrun_fallback_total{kind=\"node\"} not >= 1 (got '${fallback:-<none>}')" >&2
       exit 1

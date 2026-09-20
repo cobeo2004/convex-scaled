@@ -3,7 +3,7 @@ x-common-env: &common-env
   INSTANCE_NAME: convex-self-hosted
   INSTANCE_SECRET:
     ${INSTANCE_SECRET:?set INSTANCE_SECRET (openssl rand -hex 32)}
-  CONVEX_CLOUD_ORIGIN: http://127.0.0.1:3210
+  CONVEX_CLOUD_ORIGIN: ${CONVEX_CLOUD_ORIGIN:-http://127.0.0.1:3210}
   CONVEX_SITE_ORIGIN: http://127.0.0.1:3211
   AWS_REGION: us-east-1
   AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
@@ -96,7 +96,7 @@ services:
       FUNRUN_FALLBACK: ${FUNRUN_FALLBACK:-fail}
       FUNRUN_NODE_CALLBACK_ORIGIN: ${FUNRUN_NODE_CALLBACK_ORIGIN:-http://conductor:3210}
       FUNRUN_CONDUCTOR_METRICS_LISTEN: 0.0.0.0:9101
-    ports: ["3210:3210", "3211:3211"]
+    ports: ["3210:3210", "3211:3211", "9101:9101"]
     depends_on:
       postgres: { condition: service_healthy }
       buckets: { condition: service_completed_successfully }
@@ -162,3 +162,4 @@ services:
 volumes:
   pgdata:
   rustfsdata:
+

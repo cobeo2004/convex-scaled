@@ -266,6 +266,17 @@ pub async fn make_app(
                          address."
                     );
                 }
+                // `ctx.storage` in a "use node" action fetches URLs built from the cloud
+                // origin, so a node worker has to reach that too. Isolate workers take a
+                // syscall path instead and never fetch it.
+                let cloud = config.convex_origin_url()?;
+                if origin_is_loopback(&cloud) {
+                    tracing::warn!(
+                        "CONVEX_CLOUD_ORIGIN resolves to loopback ({cloud}); file storage in \
+                         \"use node\" actions will fail on a node worker, which cannot reach it. \
+                         Set it to an address the workers resolve too."
+                    );
+                }
                 let pool = WorkerPool::start(
                     runtime.clone(),
                     target.to_owned(),

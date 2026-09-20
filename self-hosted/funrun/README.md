@@ -56,6 +56,12 @@ FUNRUN_NODE_WORKERS=node-worker:7400 \
   `NODE_ACTION_USER_TIMEOUT` + drain), and `FUNRUN_NODE_CALLBACK_ORIGIN` must
   point back at the conductor, e.g.
   `http://conductor.railway.internal:3210`, not a public/loopback origin.
+- `CONVEX_CLOUD_ORIGIN` must also resolve on the Node workers. File storage
+  inside a `"use node"` action (`ctx.storage.store` / `.get`) fetches URLs
+  built from that origin, so the conductor's own loopback address fails
+  there, and the conductor warns at startup when a Node pool is configured
+  with one. Isolate workers are unaffected: their storage calls go through
+  the conductor as syscalls and never fetch that URL.
 
 ## Health
 
@@ -72,7 +78,9 @@ FUNRUN_NODE_WORKERS=node-worker:7400 \
   (`isolate`/`node`): `funrun_worker_load_info{pool,addr}` (last reported load
   per worker), `funrun_pool_healthy_info{pool}` (healthy worker count), and
   `funrun_fallback_total{kind="isolate"|"deploy"|"node"}` (in-process
-  fallbacks).
+  fallbacks). The exporter prefixes each of these with
+  `convex_local_backend_`, so scrape e.g.
+  `convex_local_backend_funrun_fallback_total`.
 
 ## knobs.env
 
