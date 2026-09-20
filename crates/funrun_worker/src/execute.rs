@@ -25,7 +25,6 @@ use common::{
     },
     knobs::{
         FUNRUN_ISOLATE_ACTIVE_THREADS,
-        MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE,
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
     },
     log_lines::LogLine,
@@ -47,6 +46,7 @@ use funrun_proto::{
         DeployReturn,
     },
     http::response_part_to_down,
+    max_up_message_size,
     request::run_request_from_proto,
     transaction::run_result_to_proto,
     FUNRUN_PROTOCOL_VERSION,
@@ -225,7 +225,7 @@ impl FunrunService {
         // The conductor sends RunRequests and receives results, the mirror
         // image of the `function_host` limits.
         let service = FunrunServer::new(self)
-            .max_decoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE)
+            .max_decoding_message_size(max_up_message_size())
             .max_encoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE);
         common::grpc::ConvexGrpcService::new()
             .add_service(service)

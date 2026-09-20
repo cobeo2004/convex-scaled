@@ -10,6 +10,16 @@ use std::{
 /// `LoadReport` and send it as `x-funrun-protocol` on `FunctionHost` calls.
 pub const FUNRUN_PROTOCOL_VERSION: u32 = 2;
 
+/// Size limit for `ExecuteUp`, which carries both `Run` and `Deploy` frames
+/// over one channel. Deploy is the larger of the two because analyze embeds
+/// the push's whole module source, so both ends size the channel for it.
+/// Conductor and worker must agree, hence one function rather than two knob
+/// lookups.
+pub fn max_up_message_size() -> usize {
+    (*common::knobs::MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE)
+        .max(*common::knobs::MAX_FUNRUN_DEPLOY_MESSAGE_SIZE)
+}
+
 pub mod auth;
 pub mod callbacks;
 pub mod deploy;
@@ -37,4 +47,25 @@ pub(crate) fn collect_unique<K: Ord + Debug, V>(
         map.insert(k, v);
     }
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use common::knobs::MAX_PUSH_BYTES;
+
+    use super::max_up_message_size;
+
+    /// Analyze ships the push's whole module source inside one `ExecuteUp`, so
+    /// anything the push API accepts must also fit on the funrun channel.
+    /// Otherwise a push succeeds with `FUNCTION_RUNNER=local` and fails with
+    /// `remote`, which breaks the local/remote equivalence guarantee.
+    #[test]
+    fn up_messages_fit_the_largest_accepted_push() {
+        assert!(
+            max_up_message_size() >= *MAX_PUSH_BYTES,
+            "max_up_message_size() = {} but MAX_PUSH_BYTES = {}",
+            max_up_message_size(),
+            *MAX_PUSH_BYTES,
+        );
+    }
 }

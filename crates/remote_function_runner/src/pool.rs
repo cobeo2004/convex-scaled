@@ -23,7 +23,6 @@ use std::{
 use common::{
     knobs::{
         FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM,
-        MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE,
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
     },
     runtime::{
@@ -33,6 +32,7 @@ use common::{
 };
 use funrun_proto::{
     auth::BearerInterceptor,
+    max_up_message_size,
     FUNRUN_PROTOCOL_VERSION,
 };
 use metrics::{
@@ -109,7 +109,19 @@ impl WorkerPool {
         match mode {
             RoutingMode::Proxy => {
                 let client = connect(&target, token)?;
-                pool.insert_healthy(target, client);
+                // The proxy is one endpoint standing in for the whole pool, so
+                // it gets the same WatchLoad treatment as a direct worker:
+                // unhealthy until it reports, unhealthy again the moment the
+                // stream breaks. Without this, `has_healthy()` would stay true
+                // through an Envoy outage and `FUNRUN_FALLBACK=local` would
+                // never trigger. `effective_load` is whichever backend Envoy
+                // picked, but `pick()` has nothing to choose between here.
+                let watch = rt.spawn(
+                    "funrun_watch_load",
+                    pool.clone()
+                        .watch_load(rt.clone(), target.clone(), client.clone()),
+                );
+                pool.insert_watched(target, client, watch);
             },
             RoutingMode::Direct => {
                 rt.clone().spawn_background(
@@ -156,7 +168,28 @@ impl WorkerPool {
         }
     }
 
-    /// Adds an always-healthy worker. Proxy mode, and tests.
+    /// Adds a worker whose health a `WatchLoad` task owns. Unhealthy until
+    /// that task sees the first report, exactly like a direct worker.
+    fn insert_watched(&self, addr: String, client: FunrunChannel, watch: Box<dyn SpawnHandle>) {
+        self.workers.lock().insert(
+            addr.clone(),
+            Worker {
+                client,
+                state: WorkerState {
+                    addr,
+                    load: 0.0,
+                    in_flight: 0,
+                    healthy: false,
+                },
+                _watch: Some(watch),
+                last_report: None,
+            },
+        );
+    }
+
+    /// Adds an always-healthy worker, bypassing `WatchLoad`. Tests only —
+    /// production health always comes from a report.
+    #[cfg(test)]
     pub(crate) fn insert_healthy(&self, addr: String, client: FunrunChannel) {
         self.workers.lock().insert(
             addr.clone(),
@@ -422,7 +455,9 @@ fn connect(addr: &str, token: String) -> anyhow::Result<FunrunChannel> {
         .connect_lazy();
     Ok(
         FunrunClient::with_interceptor(channel, BearerInterceptor { token })
-            .max_encoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE)
+            // One channel carries both Run and Deploy frames; Deploy is the
+            // larger of the two because it embeds the push's module source.
+            .max_encoding_message_size(max_up_message_size())
             .max_decoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE),
     )
 }
