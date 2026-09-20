@@ -37,6 +37,8 @@ for cfg in ${@:-local direct proxy node}; do
   isolates() { compose logs "$1" | grep -c 'isolate worker' || true; }
   if [[ $cfg == node ]]; then
     export EXPECT_NODE_HOST_PREFIX=$(compose ps -q node-worker | cut -c1-12)
+    # An empty prefix makes node.test.ts skip the "ran on the node worker" check.
+    [[ -n $EXPECT_NODE_HOST_PREFIX ]] || { echo "FAIL: no node-worker container id" >&2; exit 1; }
     $pm test tests/equivalence.test.ts tests/node.test.ts
   else
     $pm test tests/equivalence.test.ts

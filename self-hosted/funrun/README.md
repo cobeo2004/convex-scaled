@@ -22,6 +22,8 @@ docker compose exec conductor ./generate_admin_key.sh
 overridable env vars (defaults: `remote`, `worker:7400`, `direct`,
 `0.0.0.0:7401`, `0.0.0.0:7400`, `4`, `4`, unset, `fail`,
 `http://conductor:3210`, `isolate`, `4`, `NODE_ACTION_USER_TIMEOUT + 30s`).
+`FUNRUN_KIND` is fixed per service in compose (`worker` takes the default and
+`node-worker` sets `node`); it only matters when running the binary directly.
 
 To route through Envoy instead of direct DNS-based routing:
 
