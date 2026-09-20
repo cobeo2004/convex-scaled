@@ -26,8 +26,9 @@ test(
     if (process.env.EXPECT_NODE_HOST_PREFIX) {
       for (const r of results) {
         if (r.status === "fulfilled") {
-          expect(r.value.host.startsWith(process.env.EXPECT_NODE_HOST_PREFIX!))
-            .toBe(true);
+          expect(
+            r.value.host.startsWith(process.env.EXPECT_NODE_HOST_PREFIX!),
+          ).toBe(true);
         }
       }
     }

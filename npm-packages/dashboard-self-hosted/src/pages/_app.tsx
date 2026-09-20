@@ -7,11 +7,7 @@ import Head from "next/head";
 import { useQuery } from "convex/react";
 import udfs from "@common/udfs";
 import { useSessionStorage } from "react-use";
-import {
-  ExitIcon,
-  GearIcon,
-  TextAlignBottomIcon,
-} from "@radix-ui/react-icons";
+import { ExitIcon, GearIcon, TextAlignBottomIcon } from "@radix-ui/react-icons";
 import { ConvexLogo } from "@common/elements/ConvexLogo";
 import { ToastContainer } from "@common/elements/ToastContainer";
 import { ThemeConsumer } from "@common/elements/ThemeConsumer";
