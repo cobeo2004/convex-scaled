@@ -5,6 +5,100 @@ Conductor (`convex-local-backend`, `FUNCTION_RUNNER=remote`) + N stateless
 Convex dashboard on http://127.0.0.1:6791 (log in with the admin key below) + an
 optional Envoy proxy for `FUNRUN_ROUTING=proxy`.
 
+## Architecture
+
+![funrun topology](docs/architecture.png)
+
+The conductor owns every piece of durable state — Postgres, S3, the scheduler,
+the HTTP routes, subscriptions and the whole transaction lifecycle. Workers own
+none of it. They receive a request, run JavaScript, and hand back an outcome;
+every read they need travels back to the conductor over gRPC, and only the
+conductor commits. That is what makes a pool safe to scale by adding containers
+and safe to lose mid-request.
+
+Three pieces live inside the conductor process and are easy to confuse:
+
+| Piece               | Crate                    | Job                                                          |
+| ------------------- | ------------------------ | ------------------------------------------------------------ |
+| `WorkerPool` client | `remote_function_runner` | Picks a worker, dispatches, retries, tracks health           |
+| `FunctionHost`      | `function_host`          | gRPC **server** answering worker callbacks (reads, syscalls) |
+| Isolate host        | `function_runner`        | The real V8 host — runs inside the _worker_, not here        |
+
+`FUNCTION_RUNNER=local` collapses the entire right-hand side back into the
+conductor and is byte-for-byte upstream behaviour: no pool, no callbacks, no
+extra process. Everything below is remote mode only.
+
+Each diagram below is also a self-contained interactive page under `docs/` —
+open the `.html` next to the image for guided views, search and relationship
+tracing.
+
+### Conductor: how a call reaches a worker
+
+[![conductor routing](docs/conductor.png)](docs/conductor.html)
+
+`pick()` uses rendezvous hashing on the module path, so one module tends to keep
+landing on the same worker and reusing its warm isolate. It spills to another
+worker when the first is at capacity or measurably busier (`LOAD_SPILL_MARGIN`,
+20%). Health and load come from a background `watch_load` stream plus a 5s DNS
+refresh loop — never from the request path.
+
+Retries are keyed on a `RequestKind`, not on the connection:
+
+| Kind                  | Before `Started` | After `Started` | Refused budget |
+| --------------------- | ---------------- | --------------- | -------------- |
+| `Run(Query/Mutation)` | retry            | retry (pure)    | 1s             |
+| `Run(Action)`         | retry            | **no**          | 30s            |
+| `Run(HttpAction)`     | retry            | **no**          | 1s             |
+| `Deploy`, `NodePure`  | retry            | retry (pure)    | 1s             |
+| `NodeExecute`         | retry            | **no**          | 30s            |
+
+A `Refused` outcome means the worker was overloaded _before_ user code ran, so
+it is always safe to re-send: the conductor backs off 50ms → 2s with ±50% jitter
+until the budget for that kind is spent. Actions get 30s because failing one
+strands a committed run; a user-facing read fails fast after 1s. When a pool has
+no healthy worker at all, `FUNRUN_FALLBACK` decides between failing the call and
+running it in-process.
+
+### Isolate worker: one request
+
+[![isolate worker request](docs/isolate-worker.png)](docs/isolate-worker.html)
+
+`FUNRUN_KIND=isolate` (the default) serves queries, mutations, actions, HTTP
+actions and deploy-time evaluation — `analyze`, schema validation and component
+push all run here under the real per-evaluation limits, so the conductor creates
+**zero** isolates in remote mode. The worker loads user modules straight from
+S3, which is why remote mode requires shared storage rather than the conductor's
+local filesystem.
+
+Each attempt is one fresh bidirectional `Execute` stream. Log lines and HTTP
+response chunks stream back while user code is still running. `Started` is the
+retry boundary: once that frame is sent, the conductor knows user code may have
+had side effects.
+
+### Node worker: one `"use node"` action
+
+[![node worker action](docs/node-worker.png)](docs/node-worker.html)
+
+`"use node"` actions need a real Node.js runtime (npm packages, node builtins),
+which a V8 isolate cannot provide. Setting `FUNRUN_NODE_WORKERS=host:port`
+routes them to a separate `FUNRUN_KIND=node` pool; leave it unset and they stay
+on the conductor exactly as upstream. Each worker holds
+`FUNRUN_NODE_MAX_CONCURRENT` slots (4 by default).
+
+Two origins do two different jobs, and mixing them up is the most common
+misconfiguration:
+
+- **`FUNRUN_NODE_CALLBACK_ORIGIN`** is embedded as the action's
+  `backendAddress`. Node syscalls — `ctx.runQuery`, `ctx.runMutation`,
+  `ctx.scheduler` — go back to the conductor through it. These do _not_ route
+  through `FunctionHost`, which is the isolate-only callback path.
+- **`CONVEX_CLOUD_ORIGIN`** is baked into the `ctx.storage` URLs the action
+  fetches itself. A loopback value works on the conductor and fails on a worker,
+  so the conductor warns about it at startup.
+
+See [Node workers](#node-workers) below for the operational knobs (drain
+timeouts, fallback, Railway).
+
 ## Run it
 
 ```sh

@@ -1,0 +1,270 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Isolate worker: one request",
+    "viewBox": [
+      1040,
+      625
+    ],
+    "column_fit": "spread",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "dispatch",
+        "label": "Dispatch",
+        "focus": [
+          "client",
+          "conductor",
+          "worker"
+        ],
+        "note": "The conductor picks a worker and opens one Execute stream per attempt."
+      },
+      {
+        "id": "syscalls",
+        "label": "Reads travel back",
+        "focus": [
+          "isolate",
+          "funhost",
+          "pg"
+        ],
+        "note": "The worker has no database, so every read returns to the conductor mid-execution."
+      },
+      {
+        "id": "commit",
+        "label": "Commit and return",
+        "focus": [
+          "worker",
+          "conductor",
+          "pg",
+          "client"
+        ],
+        "note": "Only the conductor writes; the worker returns an outcome, not a committed transaction."
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "query / mutation"
+    },
+    {
+      "id": "conductor",
+      "type": "backend",
+      "label": "Conductor",
+      "sublabel": "FunctionRouter"
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Isolate worker",
+      "sublabel": "FunrunService"
+    },
+    {
+      "id": "isolate",
+      "type": "backend",
+      "label": "V8 isolate",
+      "sublabel": "user code"
+    },
+    {
+      "id": "funhost",
+      "type": "security",
+      "label": "FunctionHost",
+      "sublabel": "in the conductor"
+    },
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "source of truth"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 240,
+      "label": "Dispatch"
+    },
+    {
+      "from": 250,
+      "to": 400,
+      "label": "Execute + syscalls"
+    },
+    {
+      "from": 410,
+      "to": 530,
+      "label": "Commit + return"
+    }
+  ],
+  "messages": [
+    {
+      "id": "in",
+      "from": "client",
+      "to": "conductor",
+      "y": 165,
+      "label": "call function",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch",
+      "from": "conductor",
+      "to": "worker",
+      "y": 195,
+      "label": "Execute · Up::Request",
+      "variant": "emphasis",
+      "note": "worker chosen by rendezvous hash on the module path"
+    },
+    {
+      "id": "started",
+      "from": "worker",
+      "to": "conductor",
+      "y": 225,
+      "label": "Started",
+      "variant": "return",
+      "note": "after this frame a side-effecting call is never retried"
+    },
+    {
+      "id": "run",
+      "from": "worker",
+      "to": "isolate",
+      "y": 258,
+      "label": "run user code"
+    },
+    {
+      "id": "syscall",
+      "from": "isolate",
+      "to": "funhost",
+      "y": 288,
+      "label": "index read",
+      "variant": "security"
+    },
+    {
+      "id": "sql",
+      "from": "funhost",
+      "to": "pg",
+      "y": 316,
+      "label": "SQL"
+    },
+    {
+      "id": "rows",
+      "from": "pg",
+      "to": "funhost",
+      "y": 344,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "page",
+      "from": "funhost",
+      "to": "isolate",
+      "y": 372,
+      "label": "page",
+      "variant": "return"
+    },
+    {
+      "id": "outcome",
+      "from": "isolate",
+      "to": "worker",
+      "y": 392,
+      "label": "outcome + writes",
+      "variant": "return"
+    },
+    {
+      "id": "logs",
+      "from": "worker",
+      "to": "conductor",
+      "y": 428,
+      "label": "LogLine",
+      "variant": "dashed"
+    },
+    {
+      "id": "result",
+      "from": "worker",
+      "to": "conductor",
+      "y": 456,
+      "label": "Result",
+      "variant": "emphasis"
+    },
+    {
+      "id": "commit",
+      "from": "conductor",
+      "to": "pg",
+      "y": 486,
+      "label": "commit transaction"
+    },
+    {
+      "id": "out",
+      "from": "conductor",
+      "to": "client",
+      "y": 516,
+      "label": "response",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "conductor",
+      "from": 190,
+      "to": 522,
+      "type": "backend"
+    },
+    {
+      "participant": "worker",
+      "from": 195,
+      "to": 462,
+      "type": "backend"
+    },
+    {
+      "participant": "isolate",
+      "from": 253,
+      "to": 398,
+      "type": "backend"
+    },
+    {
+      "participant": "funhost",
+      "from": 283,
+      "to": 378,
+      "type": "security"
+    },
+    {
+      "participant": "pg",
+      "from": 311,
+      "to": 350,
+      "type": "database"
+    },
+    {
+      "participant": "pg",
+      "from": 481,
+      "to": 512,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The worker is stateless",
+      "items": [
+        "It runs JavaScript and returns an outcome.",
+        "Every read is a syscall to FunctionHost."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "One stream per attempt",
+      "items": [
+        "Each attempt opens a fresh Execute stream.",
+        "Deploy evaluation takes the same path."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Started is the retry boundary",
+      "items": [
+        "Before Started, nothing ran: resend freely.",
+        "After Started, only pure work may retry."
+      ]
+    }
+  ]
+}
