@@ -88,6 +88,7 @@ use crate::{
         platform_router,
         update_environment_variables,
     },
+    funrun_status,
     http_actions::http_action_handler,
     logs::{
         stream_function_logs,
@@ -381,7 +382,10 @@ pub fn router(st: LocalAppState) -> Router {
         axum::routing::get(move || async { platform_openapi_spec }),
     );
 
-    let api_routes = Router::new()
+    // Only in remote mode: with `FUNCTION_RUNNER=local` these paths 404 as
+    // upstream.
+    let funrun_remote = st.funrun_status.is_some();
+    let mut api_routes = Router::new()
         .merge(cli_routes)
         .merge(dashboard_routes)
         .merge(streaming_export_routes())
@@ -389,6 +393,9 @@ pub fn router(st: LocalAppState) -> Router {
         .nest("/export", snapshot_export_routes)
         .nest("/streaming_import", streaming_import_routes())
         .nest("/v1", platform_routes);
+    if funrun_remote {
+        api_routes = api_routes.route("/funrun/status", get(funrun_status::api_status));
+    }
 
     // Endpoints migrated to use the RouterState trait instead of application.
     let (public_routes, public_openapi) = OpenApiRouter::with_openapi(PublicApiDoc::openapi())
@@ -423,12 +430,13 @@ pub fn router(st: LocalAppState) -> Router {
 
     let version = SERVER_VERSION_STR.to_string();
 
-    Router::new()
+    let mut routes = Router::new()
         .nest("/api", api_routes)
-        .merge(health_check_routes(version))
-        .layer(cors())
-        .with_state(st)
-        .merge(migrated)
+        .merge(health_check_routes(version));
+    if funrun_remote {
+        routes = routes.route("/funrun/status", get(funrun_status::page));
+    }
+    routes.layer(cors()).with_state(st).merge(migrated)
 }
 
 pub fn public_api_routes<S>() -> Router<S>

@@ -56,6 +56,7 @@ use common::{
 };
 use config::{
     FunctionRunnerMode,
+    FunrunFallback,
     LocalConfig,
 };
 use database::{
@@ -96,10 +97,14 @@ use model::{
 use node_executor::{
     local::LocalNodeExecutor,
     NodeActions,
+    NodeExecutor,
 };
+use performance_stats::exporter::register_prometheus_exporter;
 use remote_function_runner::{
     pool::WorkerPool,
+    status::FunrunStatus,
     RemoteFunctionRunner,
+    RemoteNodeExecutor,
 };
 use runtime::prod::ProdRuntime;
 use search::{
@@ -126,6 +131,7 @@ pub mod deployment_audit_log;
 pub mod deployment_info;
 pub mod deployment_state;
 pub mod environment_variables;
+pub mod funrun_status;
 pub mod http_actions;
 pub mod log_sinks;
 pub mod logs;
@@ -156,6 +162,8 @@ pub struct LocalAppState {
     pub instance_name: String,
     pub application: Application<ProdRuntime>,
     pub zombify_rx: async_broadcast::Receiver<()>,
+    /// `Some` only under `FUNCTION_RUNNER=remote`; backs `/funrun/status`.
+    pub funrun_status: Option<Arc<FunrunStatus>>,
 }
 
 impl LocalAppState {
@@ -237,11 +245,61 @@ pub async fn make_app(
         region: None,
         class: DeploymentClass::S16,
     };
+    // `key_broker()` above already required the secret.
+    let instance_secret = config
+        .instance_secret
+        .as_deref()
+        .context("--instance-secret is required")?;
+    let remote = config.function_runner == FunctionRunnerMode::Remote;
     let node_process_timeout = *NODE_ACTION_USER_TIMEOUT + Duration::from_secs(5);
-    let node_executor = Arc::new(LocalNodeExecutor::new(node_process_timeout).await?);
+    let local_node: Arc<dyn NodeExecutor> =
+        Arc::new(LocalNodeExecutor::new(node_process_timeout).await?);
+    let mut node_pool_for_status: Option<Arc<WorkerPool>> = None;
+    let (node_executor, node_origin): (Arc<dyn NodeExecutor>, ConvexOrigin) =
+        match (remote, config.node_workers()) {
+            (true, Some(target)) => {
+                let origin = config.node_callback_origin()?;
+                if origin_is_loopback(&origin) {
+                    tracing::warn!(
+                        "FUNRUN_NODE_CALLBACK_ORIGIN resolves to loopback ({origin}); node \
+                         workers will call back to themselves. Set it to the conductor's private \
+                         address."
+                    );
+                }
+                // `ctx.storage` in a "use node" action fetches URLs built from the cloud
+                // origin, so a node worker has to reach that too. Isolate workers take a
+                // syscall path instead and never fetch it.
+                let cloud = config.convex_origin_url()?;
+                if origin_is_loopback(&cloud) {
+                    tracing::warn!(
+                        "CONVEX_CLOUD_ORIGIN resolves to loopback ({cloud}); file storage in \
+                         \"use node\" actions will fail on a node worker, which cannot reach it. \
+                         Set it to an address the workers resolve too."
+                    );
+                }
+                let pool = WorkerPool::start(
+                    runtime.clone(),
+                    target.to_owned(),
+                    config.funrun_routing,
+                    worker_token(instance_secret),
+                    "node",
+                )?;
+                node_pool_for_status = Some(pool.clone());
+                let fallback =
+                    (config.funrun_fallback == FunrunFallback::Local).then(|| local_node.clone());
+                (Arc::new(RemoteNodeExecutor::new(pool, fallback)), origin)
+            },
+            (true, None) => {
+                tracing::info!(
+                    "FUNRUN_NODE_WORKERS unset: \"use node\" actions run on the conductor"
+                );
+                (local_node, config.convex_origin_url()?)
+            },
+            (false, _) => (local_node, config.convex_origin_url()?),
+        };
     let node_actions = NodeActions::new(
         node_executor,
-        config.convex_origin_url()?,
+        node_origin,
         *NODE_ACTION_USER_TIMEOUT,
         runtime.clone(),
         deployment.clone(),
@@ -276,11 +334,7 @@ pub async fn make_app(
         database.clone(),
         fetch_client.clone(),
     )?;
-    // `key_broker()` above already required the secret.
-    let instance_secret = config
-        .instance_secret
-        .as_deref()
-        .context("--instance-secret is required")?;
+    let mut isolate_pool_for_status: Option<Arc<WorkerPool>> = None;
     let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> = match config.function_runner {
         FunctionRunnerMode::Local => Arc::new(local_runner),
         FunctionRunnerMode::Remote => {
@@ -295,10 +349,12 @@ pub async fn make_app(
                     .context("FUNRUN_WORKERS is required")?,
                 config.funrun_routing,
                 worker_token(instance_secret),
+                "isolate",
             )?;
+            isolate_pool_for_status = Some(pool.clone());
             Arc::new(RemoteFunctionRunner::new(
                 pool,
-                local_runner,
+                (config.funrun_fallback == FunrunFallback::Local).then_some(local_runner),
                 database.clone(),
                 deployment,
                 config.convex_origin_url()?,
@@ -306,6 +362,16 @@ pub async fn make_app(
             ))
         },
     };
+    let funrun_status = isolate_pool_for_status.map(|isolate| {
+        Arc::new(FunrunStatus::new(
+            isolate,
+            node_pool_for_status,
+            match config.funrun_fallback {
+                FunrunFallback::Fail => "fail",
+                FunrunFallback::Local => "local",
+            },
+        ))
+    });
 
     let persistence_reader = persistence.reader();
     let application = Application::new(
@@ -360,6 +426,12 @@ pub async fn make_app(
         )?;
     }
 
+    if let Some(addr) = config.funrun_conductor_metrics_listen {
+        // Serves for the life of the process.
+        let (handle, _flush) = register_prometheus_exporter(runtime.clone(), addr);
+        handle.detach();
+    }
+
     let origin = config.convex_origin_url()?;
     let instance_name = config.name();
 
@@ -379,9 +451,23 @@ pub async fn make_app(
         instance_name,
         application,
         zombify_rx,
+        funrun_status,
     };
 
     Ok(app_state)
+}
+
+/// Whether `origin`'s host is `localhost` or a loopback IP.
+fn origin_is_loopback(origin: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// The `StorageType::S3` prefix `Application::initialize_storage` persisted in
@@ -488,7 +574,19 @@ mod tests {
         Timestamp,
     };
 
-    use super::worker_ts;
+    use super::{
+        origin_is_loopback,
+        worker_ts,
+    };
+
+    #[test]
+    fn funrun_origin_is_loopback_detects_loopback_hosts() {
+        assert!(origin_is_loopback("http://127.0.0.1:3210"));
+        assert!(origin_is_loopback("http://localhost:3210"));
+        assert!(origin_is_loopback("http://[::1]:3210"));
+        assert!(!origin_is_loopback("http://conductor:3210"));
+        assert!(!origin_is_loopback("https://api.example.com"));
+    }
 
     fn repeatable(ts: u64) -> RepeatableTimestamp {
         RepeatableTimestamp::new_validated(

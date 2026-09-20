@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Node worker: one \"use node\" action",
+    "viewBox": [980, 562],
+    "column_fit": "spread",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "dispatch",
+        "label": "Dispatch",
+        "focus": ["client", "conductor", "nodeworker"],
+        "note": "Only reached when FUNRUN_NODE_WORKERS names a pool; otherwise the action stays on the conductor."
+      },
+      {
+        "id": "origins",
+        "label": "Two callback origins",
+        "focus": ["nodeproc", "conductor", "s3"],
+        "note": "Syscalls use the callback origin; ctx.storage fetches URLs built from the cloud origin."
+      },
+      {
+        "id": "return",
+        "label": "Return",
+        "focus": ["nodeproc", "nodeworker", "conductor", "client"],
+        "note": "The worker hands back a result JSON; the conductor owns the transaction."
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Caller",
+      "sublabel": "action or schedule"
+    },
+    {
+      "id": "conductor",
+      "type": "backend",
+      "label": "Conductor",
+      "sublabel": "NodeActions"
+    },
+    {
+      "id": "nodeworker",
+      "type": "backend",
+      "label": "Node worker",
+      "sublabel": "FUNRUN_KIND=node"
+    },
+    {
+      "id": "nodeproc",
+      "type": "backend",
+      "label": "Node.js process",
+      "sublabel": "local.cjs"
+    },
+    {
+      "id": "s3",
+      "type": "cloud",
+      "label": "RustFS / S3",
+      "sublabel": "file storage"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 240,
+      "label": "Dispatch"
+    },
+    {
+      "from": 250,
+      "to": 396,
+      "label": "Run + callbacks"
+    },
+    {
+      "from": 406,
+      "to": 500,
+      "label": "Return"
+    }
+  ],
+  "messages": [
+    {
+      "id": "in",
+      "from": "client",
+      "to": "conductor",
+      "y": 165,
+      "label": "\"use node\" action",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch",
+      "from": "conductor",
+      "to": "nodeworker",
+      "y": 198,
+      "label": "Execute · Up::Node",
+      "variant": "emphasis",
+      "note": "no healthy worker? FUNRUN_FALLBACK decides: fail, or run in-process"
+    },
+    {
+      "id": "started",
+      "from": "nodeworker",
+      "to": "conductor",
+      "y": 228,
+      "label": "Started",
+      "variant": "return",
+      "note": "a NodeExecute is never retried after this frame"
+    },
+    {
+      "id": "invoke",
+      "from": "nodeworker",
+      "to": "nodeproc",
+      "y": 260,
+      "label": "invoke over unix socket"
+    },
+    {
+      "id": "syscall",
+      "from": "nodeproc",
+      "to": "conductor",
+      "y": 292,
+      "label": "ctx.runQuery · callback origin",
+      "variant": "security"
+    },
+    {
+      "id": "rows",
+      "from": "conductor",
+      "to": "nodeproc",
+      "y": 320,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "storage",
+      "from": "nodeproc",
+      "to": "s3",
+      "y": 350,
+      "label": "ctx.storage · cloud origin",
+      "variant": "security",
+      "note": "URL is built from CONVEX_CLOUD_ORIGIN, so it must resolve on the worker too"
+    },
+    {
+      "id": "file",
+      "from": "s3",
+      "to": "nodeproc",
+      "y": 378,
+      "label": "file",
+      "variant": "return"
+    },
+    {
+      "id": "done",
+      "from": "nodeproc",
+      "to": "nodeworker",
+      "y": 410,
+      "label": "result JSON",
+      "variant": "return"
+    },
+    {
+      "id": "result",
+      "from": "nodeworker",
+      "to": "conductor",
+      "y": 440,
+      "label": "NodeResult",
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "from": "conductor",
+      "to": "client",
+      "y": 470,
+      "label": "response",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "conductor",
+      "from": 193,
+      "to": 476,
+      "type": "backend"
+    },
+    {
+      "participant": "nodeworker",
+      "from": 198,
+      "to": 446,
+      "type": "backend"
+    },
+    {
+      "participant": "nodeproc",
+      "from": 255,
+      "to": 416,
+      "type": "backend"
+    },
+    {
+      "participant": "s3",
+      "from": 345,
+      "to": 384,
+      "type": "cloud"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Why a second pool",
+      "items": [
+        "\"use node\" actions need real Node.js.",
+        "Unset FUNRUN_NODE_WORKERS to stay upstream."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Two origins, two jobs",
+      "items": [
+        "CALLBACK_ORIGIN: syscalls back to the conductor.",
+        "CLOUD_ORIGIN: baked into ctx.storage URLs."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Capacity and retries",
+      "items": [
+        "FUNRUN_NODE_MAX_CONCURRENT slots, 4 by default.",
+        "A refused action backs off for up to 30s."
+      ]
+    }
+  ]
+}

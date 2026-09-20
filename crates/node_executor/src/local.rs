@@ -252,19 +252,22 @@ impl LocalNodeExecutor {
             }
         }
     }
-}
 
-#[async_trait]
-impl NodeExecutor for LocalNodeExecutor {
-    fn enable(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn invoke(
+    /// Same as [`NodeExecutor::invoke`], but takes the already-serialized
+    /// request JSON. Used by funrun Node workers, which receive the request
+    /// from the conductor pre-serialized.
+    pub async fn invoke_json(
         &self,
-        request: ExecutorRequest,
+        request_json: JsonValue,
         log_line_sender: mpsc::UnboundedSender<LogLine>,
     ) -> anyhow::Result<InvokeResponse> {
+        let client = self.client().await?;
+        self.post_invoke(client, request_json, log_line_sender)
+            .await
+    }
+
+    /// Starts the Node server on first use.
+    async fn client(&self) -> anyhow::Result<reqwest::Client> {
         let client = {
             let mut inner = self.inner.lock().await;
             if inner.is_none() {
@@ -277,8 +280,15 @@ impl NodeExecutor for LocalNodeExecutor {
             let inner = inner.as_ref().unwrap();
             inner.client.clone()
         };
-        let request_json = JsonValue::try_from(request)?;
+        Ok(client)
+    }
 
+    async fn post_invoke(
+        &self,
+        client: reqwest::Client,
+        request_json: JsonValue,
+        log_line_sender: mpsc::UnboundedSender<LogLine>,
+    ) -> anyhow::Result<InvokeResponse> {
         let response_result = client
             .post("http://localhost/invoke".to_string())
             .json(&request_json)
@@ -337,6 +347,24 @@ impl NodeExecutor for LocalNodeExecutor {
             },
             Err(e) => Ok(e),
         }
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for LocalNodeExecutor {
+    fn enable(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn invoke(
+        &self,
+        request: ExecutorRequest,
+        log_line_sender: mpsc::UnboundedSender<LogLine>,
+    ) -> anyhow::Result<InvokeResponse> {
+        let client = self.client().await?;
+        let request_json = JsonValue::try_from(request)?;
+        self.post_invoke(client, request_json, log_line_sender)
+            .await
     }
 
     fn shutdown(&self) {}

@@ -23,8 +23,15 @@ message ExecuteUp {
   oneof inner {
     RunRequest request = 1;
     BodyChunk http_request_body = 2;
+    DeployRequest deploy = 3;
+    NodeRequest node = 4;
   }
 }
+
+// JSON of funrun_proto::deploy::DeployRequestJson.
+message DeployRequest { bytes json = 1; }
+// JSON of node_executor's ExecutorRequest (`JsonValue::try_from`).
+message NodeRequest { bytes executor_request_json = 1; }
 
 message BodyChunk {
   bytes data = 1;
@@ -39,7 +46,23 @@ message ExecuteDown {
     bytes http_response_body = 4;
     RunResult result = 5;
     Overloaded overloaded = 6;
+    DeployResult deploy_result = 7;
+    NodeResult node_result = 8;
   }
+}
+
+message DeployResult {
+  oneof result {
+    // JSON of funrun_proto::deploy::DeployReturnJson.
+    bytes json = 1;
+    // Only `analyze` returns a user JsError as a value.
+    common.JsError js_error = 2;
+  }
+}
+
+message NodeResult {
+  bytes response_json = 1;
+  optional string aws_request_id = 2;
 }
 
 // Sent once the isolate has accepted the request (isolate function_started

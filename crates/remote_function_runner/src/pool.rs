@@ -14,13 +14,15 @@ use std::{
         },
         Arc,
     },
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use common::{
     knobs::{
         FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM,
-        MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE,
         MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE,
     },
     runtime::{
@@ -30,7 +32,12 @@ use common::{
 };
 use funrun_proto::{
     auth::BearerInterceptor,
+    max_up_message_size,
     FUNRUN_PROTOCOL_VERSION,
+};
+use metrics::{
+    log_gauge_with_labels,
+    StaticMetricLabel,
 };
 use parking_lot::Mutex;
 use pb_funrun::funrun::{
@@ -44,11 +51,16 @@ use tonic::{
 };
 
 use crate::{
+    metrics::{
+        FUNRUN_POOL_HEALTHY_INFO,
+        FUNRUN_WORKER_LOAD_INFO,
+    },
     pick::{
         pick,
         WorkerState,
     },
     retry::is_transport_failure,
+    status::WorkerStatus,
 };
 
 pub type FunrunChannel = FunrunClient<InterceptedService<Channel, BearerInterceptor>>;
@@ -71,27 +83,45 @@ struct Worker {
     state: WorkerState,
     // Aborts the worker's WatchLoad task when the worker leaves the pool.
     _watch: Option<Box<dyn SpawnHandle>>,
+    // Set on every `WatchLoad` report; `None` until the first one arrives.
+    last_report: Option<Instant>,
 }
 
 pub struct WorkerPool {
     workers: Mutex<BTreeMap<String, Worker>>,
     // Family of the first address DNS returned; see `prefer_family`.
     prefer_ipv6: AtomicBool,
+    /// `"isolate"` or `"node"`; labels this pool's metrics.
+    name: &'static str,
 }
 
 impl WorkerPool {
-    /// `target` is `host:port`. `token` is the funrun bearer token.
+    /// `target` is `host:port`. `token` is the funrun bearer token. `name`
+    /// labels the pool's metrics.
     pub fn start<RT: Runtime>(
         rt: RT,
         target: String,
         mode: RoutingMode,
         token: String,
+        name: &'static str,
     ) -> anyhow::Result<Arc<Self>> {
-        let pool = Self::empty();
+        let pool = Self::named(name);
         match mode {
             RoutingMode::Proxy => {
                 let client = connect(&target, token)?;
-                pool.insert_healthy(target, client);
+                // The proxy is one endpoint standing in for the whole pool, so
+                // it gets the same WatchLoad treatment as a direct worker:
+                // unhealthy until it reports, unhealthy again the moment the
+                // stream breaks. Without this, `has_healthy()` would stay true
+                // through an Envoy outage and `FUNRUN_FALLBACK=local` would
+                // never trigger. `effective_load` is whichever backend Envoy
+                // picked, but `pick()` has nothing to choose between here.
+                let watch = rt.spawn(
+                    "funrun_watch_load",
+                    pool.clone()
+                        .watch_load(rt.clone(), target.clone(), client.clone()),
+                );
+                pool.insert_watched(target, client, watch);
             },
             RoutingMode::Direct => {
                 rt.clone().spawn_background(
@@ -138,7 +168,28 @@ impl WorkerPool {
         }
     }
 
-    /// Adds an always-healthy worker. Proxy mode, and tests.
+    /// Adds a worker whose health a `WatchLoad` task owns. Unhealthy until
+    /// that task sees the first report, exactly like a direct worker.
+    fn insert_watched(&self, addr: String, client: FunrunChannel, watch: Box<dyn SpawnHandle>) {
+        self.workers.lock().insert(
+            addr.clone(),
+            Worker {
+                client,
+                state: WorkerState {
+                    addr,
+                    load: 0.0,
+                    in_flight: 0,
+                    healthy: false,
+                },
+                _watch: Some(watch),
+                last_report: None,
+            },
+        );
+    }
+
+    /// Adds an always-healthy worker, bypassing `WatchLoad`. Tests only —
+    /// production health always comes from a report.
+    #[cfg(test)]
     pub(crate) fn insert_healthy(&self, addr: String, client: FunrunChannel) {
         self.workers.lock().insert(
             addr.clone(),
@@ -151,14 +202,48 @@ impl WorkerPool {
                     healthy: true,
                 },
                 _watch: None,
+                last_report: None,
             },
         );
+        self.report_healthy();
     }
 
+    pub fn has_healthy(&self) -> bool {
+        self.workers.lock().values().any(|w| w.state.healthy)
+    }
+
+    /// A point-in-time view of every worker in the pool, for `/funrun/status`.
+    pub fn snapshot(&self) -> Vec<WorkerStatus> {
+        self.workers
+            .lock()
+            .values()
+            .map(|w| WorkerStatus {
+                addr: w.state.addr.clone(),
+                healthy: w.state.healthy,
+                load: w.state.load,
+                in_flight: w.state.in_flight,
+                last_report_ms: w.last_report.map(|t| t.elapsed().as_millis() as u64),
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn empty() -> Arc<Self> {
+        Self::named("test")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_last_report_for_test(&self, addr: &str, at: Instant) {
+        if let Some(w) = self.workers.lock().get_mut(addr) {
+            w.last_report = Some(at);
+        }
+    }
+
+    fn named(name: &'static str) -> Arc<Self> {
         Arc::new(Self {
             workers: Mutex::new(BTreeMap::new()),
             prefer_ipv6: AtomicBool::new(false),
+            name,
         })
     }
 
@@ -181,8 +266,18 @@ impl WorkerPool {
 
     fn sync_workers<RT: Runtime>(self: &Arc<Self>, rt: &RT, addrs: &BTreeSet<String>, token: &str) {
         let mut workers = self.workers.lock();
-        // Dropping a worker aborts its WatchLoad task.
-        workers.retain(|addr, _| addrs.contains(addr));
+        let before = workers.len();
+        // Dropping a worker aborts its WatchLoad task. Its load series goes
+        // too, so DNS churn does not grow the gauge's cardinality.
+        workers.retain(|addr, _| {
+            let keep = addrs.contains(addr);
+            if !keep {
+                // Err only when the series was never set.
+                let _ = FUNRUN_WORKER_LOAD_INFO.remove_label_values(&[self.name, addr]);
+            }
+            keep
+        });
+        let worker_removed = workers.len() < before;
         for addr in addrs {
             if workers.contains_key(addr) {
                 continue;
@@ -211,8 +306,15 @@ impl WorkerPool {
                         healthy: false,
                     },
                     _watch: Some(watch),
+                    last_report: None,
                 },
             );
+        }
+        drop(workers);
+        // New workers start unhealthy, so only a removal can change the
+        // healthy count here.
+        if worker_removed {
+            self.report_healthy();
         }
     }
 
@@ -238,10 +340,23 @@ impl WorkerPool {
                                     break;
                                 }
                                 delay = RECONNECT_DELAY;
-                                self.update(&addr, |s| {
-                                    s.load = report.effective_load;
-                                    s.healthy = true;
+                                // The gauge is set under the workers lock, so
+                                // it cannot outlive `sync_workers` removing
+                                // this worker's series.
+                                self.update(&addr, |w| {
+                                    w.state.load = report.effective_load;
+                                    w.state.healthy = true;
+                                    w.last_report = Some(Instant::now());
+                                    log_gauge_with_labels(
+                                        &FUNRUN_WORKER_LOAD_INFO,
+                                        report.effective_load,
+                                        vec![
+                                            StaticMetricLabel::new("pool", self.name),
+                                            StaticMetricLabel::new("addr", addr.clone()),
+                                        ],
+                                    );
                                 });
+                                self.report_healthy();
                             },
                             Ok(None) => {
                                 tracing::warn!("funrun worker {addr} ended WatchLoad");
@@ -260,15 +375,39 @@ impl WorkerPool {
                     delay = reconnect_delay(delay, &status);
                 },
             }
-            self.update(&addr, |s| s.healthy = false);
+            self.update(&addr, |w| w.state.healthy = false);
+            self.report_healthy();
             rt.wait(delay).await;
         }
     }
 
-    fn update(&self, addr: &str, f: impl FnOnce(&mut WorkerState)) {
-        if let Some(w) = self.workers.lock().get_mut(addr) {
-            f(&mut w.state);
+    /// Applies `f` to the worker at `addr`. Callers that change a worker's
+    /// health must also call `report_healthy`; this alone does not, so it
+    /// stays cheap to call from a hot path like the in-flight counter.
+    fn update(&self, addr: &str, f: impl FnOnce(&mut Worker)) {
+        let mut workers = self.workers.lock();
+        if let Some(w) = workers.get_mut(addr) {
+            f(w);
         }
+    }
+
+    /// Reports the pool's healthy worker count (labelled with this pool's
+    /// `name`). Call this only from the paths that actually change a
+    /// worker's health (`insert_healthy`, worker removal, and the
+    /// `watch_load` success/failure transitions) — not from the in-flight
+    /// counter, which does not affect health.
+    fn report_healthy(&self) {
+        let healthy = self
+            .workers
+            .lock()
+            .values()
+            .filter(|w| w.state.healthy)
+            .count();
+        log_gauge_with_labels(
+            &FUNRUN_POOL_HEALTHY_INFO,
+            healthy as f64,
+            vec![StaticMetricLabel::new("pool", self.name)],
+        );
     }
 }
 
@@ -279,8 +418,9 @@ pub struct InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.pool
-            .update(&self.addr, |s| s.in_flight = s.in_flight.saturating_sub(1));
+        self.pool.update(&self.addr, |w| {
+            w.state.in_flight = w.state.in_flight.saturating_sub(1)
+        });
     }
 }
 
@@ -315,7 +455,9 @@ fn connect(addr: &str, token: String) -> anyhow::Result<FunrunChannel> {
         .connect_lazy();
     Ok(
         FunrunClient::with_interceptor(channel, BearerInterceptor { token })
-            .max_encoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE)
+            // One channel carries both Run and Deploy frames; Deploy is the
+            // larger of the two because it embeds the push's module source.
+            .max_encoding_message_size(max_up_message_size())
             .max_decoding_message_size(*MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE),
     )
 }
@@ -349,12 +491,15 @@ mod tests {
 
     use super::{
         check_protocol_version,
+        connect_for_test,
         prefer_family,
         reconnect_delay,
+        WorkerPool,
         WorkerState,
         MAX_RECONNECT_DELAY,
         RECONNECT_DELAY,
     };
+    use crate::metrics::FUNRUN_POOL_HEALTHY_INFO;
 
     #[test]
     fn dual_stack_workers_route_within_the_preferred_family() {
@@ -416,5 +561,28 @@ mod tests {
     fn lost_connection_reconnects_quickly() {
         let lost = Status::unavailable("connection reset");
         assert_eq!(reconnect_delay(MAX_RECONNECT_DELAY, &lost), RECONNECT_DELAY);
+    }
+
+    // ponytail: `connect_for_test` lazily connects, which needs a Tokio
+    // reactor even though nothing here awaits; `#[tokio::test]` supplies one.
+    #[tokio::test]
+    async fn in_flight_decrement_does_not_change_the_healthy_gauge() {
+        // Unique pool name: FUNRUN_POOL_HEALTHY_INFO is a process-global
+        // metric, and other tests reuse WorkerPool::empty()'s "test" name.
+        let pool = WorkerPool::named("gauge_test_in_flight_decrement");
+        pool.insert_healthy("w:1".to_string(), connect_for_test("w:1"));
+        pool.insert_healthy("w:2".to_string(), connect_for_test("w:2"));
+        let healthy_gauge = || {
+            FUNRUN_POOL_HEALTHY_INFO
+                .with_label_values(&["gauge_test_in_flight_decrement"])
+                .get()
+        };
+        assert_eq!(healthy_gauge(), 2.0);
+
+        // Completing a request changes only `in_flight`, not health, so the
+        // healthy gauge must still read correctly afterwards.
+        drop(pool.begin("w:1"));
+        assert_eq!(healthy_gauge(), 2.0);
+        assert!(pool.snapshot().iter().all(|w| w.healthy));
     }
 }

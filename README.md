@@ -49,9 +49,10 @@ instructions. Community support for self-hosting is available in the
 This fork can run Convex functions on a pool of stateless worker processes
 instead of inside the backend. The backend becomes the **conductor**: it keeps
 the sync engine, the lease, OCC, commits and every index read, exactly as
-upstream. Only `run_function` moves out of the process, so V8 execution scales
+upstream. Function execution moves out of the process — queries, mutations,
+actions, deploy-time evaluation and `"use node"` actions — so V8 and Node scale
 horizontally while the core of Convex stays unchanged. `FUNCTION_RUNNER=local`
-(the default) keeps the upstream in-process behaviour.
+(the default) keeps the upstream in-process behaviour, byte for byte.
 
 ![Convex scaled architecture](self-hosted/funrun/docs/architecture.png)
 
@@ -60,18 +61,41 @@ horizontally while the core of Convex stays unchanged. `FUNCTION_RUNNER=local`
   by module affinity and reported load, and retries safely. It also runs the
   `FunctionHost` gRPC service (`crates/function_host`) that workers call back
   for index pages, text search and action callbacks.
-- **Workers** (`crates/funrun_worker`): run upstream's `FunctionRunnerCore` in
-  V8. They hold no state; modules and files come from S3 (RustFS in the Compose
-  stack). Workers are found by DNS (`FUNRUN_ROUTING=direct`) or behind one Envoy
-  address (`FUNRUN_ROUTING=proxy`).
+- **Isolate workers** (`crates/funrun_worker`, `FUNRUN_KIND=isolate`): run
+  upstream's `FunctionRunnerCore` in V8, including deploy-time `analyze` and
+  schema evaluation. They hold no state; modules and files come from S3 (RustFS
+  in the Compose stack). Workers are found by DNS (`FUNRUN_ROUTING=direct`) or
+  behind one Envoy address (`FUNRUN_ROUTING=proxy`).
+- **Node workers** (`FUNRUN_KIND=node`): an opt-in second pool behind
+  `FUNRUN_NODE_WORKERS`, running `"use node"` actions in real Node.js processes
+  for npm packages and node builtins. Unset, those actions stay on the conductor
+  exactly as upstream.
 - **Wire protocol** (`crates/pb_funrun`, `crates/funrun_proto`): one
-  bidirectional `Execute` stream per run. Bearer tokens are derived from
-  `INSTANCE_SECRET`, one per direction, and the protocol version is checked both
-  ways.
+  bidirectional `Execute` stream per attempt, carrying `Run`, `Deploy` and
+  `Node` frames. Bearer tokens are derived from `INSTANCE_SECRET`, one per
+  direction, and the protocol version is checked both ways.
 
-### How a mutation runs
+### How a call reaches a worker
 
-![Remote mutation flow](self-hosted/funrun/docs/mutation-flow.png)
+![Conductor routing](self-hosted/funrun/docs/conductor.png)
+
+`pick()` hashes the module path (rendezvous hashing), so one module tends to
+reuse one worker's warm isolate, spilling elsewhere when that worker is full or
+measurably busier. Health and load arrive on a background stream, never on the
+request path. With no healthy worker, `FUNRUN_FALLBACK` chooses between failing
+the call and running it in-process.
+
+Retries are keyed on the kind of work, not the connection. Before the worker
+sends `Started`, nothing has run, so anything may be re-sent. After `Started`,
+only pure work — queries, mutations, deploy evaluation — may be retried; an
+action never runs twice. A worker that refuses a request was overloaded before
+user code ran, so the conductor backs off (50ms → 2s, jittered) within a
+per-kind budget: 30s for actions, whose failure would strand a committed run, 1s
+for user-facing reads.
+
+### How a query or mutation runs
+
+![Isolate worker request](self-hosted/funrun/docs/isolate-worker.png)
 
 1. The conductor picks a read timestamp and sends a `RunRequest` to a worker
    over an `Execute` stream.
@@ -83,9 +107,17 @@ horizontally while the core of Convex stays unchanged. `FUNCTION_RUNNER=local`
    them with upstream's OCC check. A conflict retries the mutation, just as in
    process.
 
-Retries: queries and mutations are retried on transport failures. An action or
-HTTP action is retried only if the worker never received it or refused it before
-starting, so it never runs twice. A run that reaches its timeout is not retried.
+### How a `"use node"` action runs
+
+![Node worker action](self-hosted/funrun/docs/node-worker.png)
+
+The node worker invokes a Node.js child over a unix socket. Syscalls such as
+`ctx.runQuery` return to the conductor through `FUNRUN_NODE_CALLBACK_ORIGIN` —
+not through `FunctionHost`, which serves the isolate path only — while
+`ctx.storage` URLs are built from `CONVEX_CLOUD_ORIGIN` and fetched by the
+action itself. Both origins must resolve from the worker, so a loopback address
+that works on the conductor will fail here; the conductor warns about that at
+startup.
 
 ### Try it
 

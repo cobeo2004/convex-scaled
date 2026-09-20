@@ -1,0 +1,240 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Conductor: how a call reaches a worker",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "happy",
+        "label": "Happy path",
+        "focus": ["incoming", "mode", "healthy", "pick", "stream", "respond"],
+        "note": "Remote mode, a healthy pool, one attempt, one result."
+      },
+      {
+        "id": "no-worker",
+        "label": "No healthy worker",
+        "focus": ["healthy", "inproc", "respond"],
+        "note": "FUNRUN_FALLBACK decides between failing the call and running it in-process."
+      },
+      {
+        "id": "recover",
+        "label": "Failure and retry",
+        "focus": ["stream", "classify", "pick", "giveup"],
+        "note": "What the conductor may safely re-send, and when it stops trying."
+      }
+    ],
+    "viewBox": [1190, 660]
+  },
+  "lanes": [
+    {
+      "id": "intake",
+      "label": "Caller"
+    },
+    {
+      "id": "routing",
+      "label": "Conductor routing"
+    },
+    {
+      "id": "worker",
+      "label": "Worker"
+    },
+    {
+      "id": "recovery",
+      "label": "Fallback + retry",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "intake-phase",
+      "label": "Intake",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "route-phase",
+      "label": "Route",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "run-phase",
+      "label": "Run + recover",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "mainPath": ["incoming", "mode", "healthy", "pick", "stream", "respond"],
+  "nodes": [
+    {
+      "id": "incoming",
+      "lane": "intake",
+      "col": 0,
+      "type": "external",
+      "label": "Function call",
+      "sublabel": "query · action · deploy",
+      "width": 118
+    },
+    {
+      "id": "mode",
+      "lane": "routing",
+      "col": 1,
+      "type": "security",
+      "label": "FUNCTION_RUNNER",
+      "sublabel": "local or remote",
+      "tag": "local = upstream",
+      "width": 124
+    },
+    {
+      "id": "healthy",
+      "lane": "routing",
+      "col": 2,
+      "type": "backend",
+      "label": "Healthy worker?",
+      "sublabel": "per-pool health",
+      "width": 124
+    },
+    {
+      "id": "pick",
+      "lane": "routing",
+      "col": 3,
+      "type": "backend",
+      "label": "pick()",
+      "sublabel": "hash + load spill",
+      "width": 100
+    },
+    {
+      "id": "stream",
+      "lane": "worker",
+      "col": 4,
+      "type": "backend",
+      "label": "Execute stream",
+      "sublabel": "Started → Result",
+      "width": 118
+    },
+    {
+      "id": "respond",
+      "lane": "intake",
+      "col": 5,
+      "type": "external",
+      "label": "Return",
+      "sublabel": "result or error",
+      "width": 100
+    },
+    {
+      "id": "inproc",
+      "lane": "recovery",
+      "col": 2,
+      "type": "cloud",
+      "label": "Run in-process",
+      "sublabel": "FUNRUN_FALLBACK=local",
+      "width": 126
+    },
+    {
+      "id": "classify",
+      "lane": "recovery",
+      "col": 4,
+      "type": "security",
+      "label": "Classify outcome",
+      "sublabel": "refused · lost",
+      "width": 132
+    },
+    {
+      "id": "giveup",
+      "lane": "recovery",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Overloaded",
+      "sublabel": "budget spent",
+      "width": 100
+    }
+  ],
+  "edges": [
+    {
+      "from": "incoming",
+      "to": "mode",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mode",
+      "to": "healthy",
+      "label": "remote",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mode",
+      "to": "inproc",
+      "label": "local",
+      "variant": "dashed"
+    },
+    {
+      "from": "healthy",
+      "to": "pick",
+      "label": "yes",
+      "variant": "emphasis"
+    },
+    {
+      "from": "healthy",
+      "to": "inproc",
+      "label": "none left",
+      "variant": "security"
+    },
+    {
+      "from": "pick",
+      "to": "stream",
+      "variant": "emphasis"
+    },
+    {
+      "from": "stream",
+      "to": "respond",
+      "label": "Result",
+      "variant": "emphasis"
+    },
+    {
+      "from": "stream",
+      "to": "classify",
+      "label": "failed",
+      "variant": "security"
+    },
+    {
+      "from": "classify",
+      "to": "pick",
+      "label": "may retry"
+    },
+    {
+      "from": "classify",
+      "to": "giveup",
+      "label": "no budget",
+      "role": "error",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Routing",
+      "items": [
+        "pick() hashes the module path, so one module reuses one warm isolate.",
+        "It spills to another worker when the first is full or busier."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "What may be retried",
+      "items": [
+        "Before Started nothing ran, so anything may be re-sent.",
+        "After Started only pure work — queries, mutations, deploy — retries."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "When it stops",
+      "items": [
+        "Refused retries back off 50ms → 2s inside a per-kind budget.",
+        "Actions get 30s; user-facing reads fail fast after 1s."
+      ]
+    }
+  ]
+}

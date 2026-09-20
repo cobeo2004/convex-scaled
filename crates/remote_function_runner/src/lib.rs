@@ -1,6 +1,8 @@
 //! Conductor side of remote function execution: `RemoteFunctionRunner` sends
 //! `run_function` to a funrun worker and retries only when that cannot run a
-//! function's side effects twice. Everything else runs in process.
+//! function's side effects twice. With `FUNCTION_RUNNER=remote`, runs and
+//! deploy-time evaluation go to funrun workers, and Node actions go to the
+//! Node worker pool when `FUNRUN_NODE_WORKERS` is set.
 
 use std::{
     collections::{
@@ -58,6 +60,11 @@ use function_runner::{
 };
 use funrun_proto::{
     auth::MODULE_HEADER,
+    deploy::{
+        decode_return,
+        DeployCall,
+        DeployReturn,
+    },
     http::down_to_response_part,
     request::{
         run_request_to_proto,
@@ -95,13 +102,15 @@ use model::{
 };
 use pb::error_metadata::ErrorMetadataStatusExt;
 use pb_funrun::funrun::{
+    deploy_result,
     execute_down::Inner as Down,
     execute_up::Inner as Up,
     BodyChunk,
+    DeployResult,
     ExecuteDown,
     ExecuteUp,
+    NodeResult,
     Overloaded,
-    RunRequest,
     RunResult,
     Started,
 };
@@ -122,6 +131,10 @@ use usage_tracking::FunctionUsageStats;
 use value::identifier::Identifier;
 
 use crate::{
+    metrics::{
+        log_fallback,
+        FallbackKind,
+    },
     pool::{
         FunrunChannel,
         WorkerPool,
@@ -131,17 +144,24 @@ use crate::{
         is_transport_failure,
         may_retry,
         Delivery,
-        FailureStage,
+        RequestKind,
     },
 };
 
+pub mod metrics;
+mod node;
 pub mod pick;
 pub mod pool;
 pub mod retry;
+pub mod status;
+
+pub use crate::node::RemoteNodeExecutor;
 
 pub struct RemoteFunctionRunner<RT: Runtime> {
     pool: Arc<WorkerPool>,
-    local: InProcessFunctionRunner<RT>,
+    /// Set when `FUNRUN_FALLBACK=local`: runs requests in process while the
+    /// pool has no healthy worker.
+    local: Option<InProcessFunctionRunner<RT>>,
     database: Database<RT>,
     deployment: DeploymentMetadata,
     convex_origin: ConvexOrigin,
@@ -153,7 +173,7 @@ impl<RT: Runtime> RemoteFunctionRunner<RT> {
     /// build their module and file storage from it.
     pub fn new(
         pool: Arc<WorkerPool>,
-        local: InProcessFunctionRunner<RT>,
+        local: Option<InProcessFunctionRunner<RT>>,
         database: Database<RT>,
         deployment: DeploymentMetadata,
         convex_origin: ConvexOrigin,
@@ -167,6 +187,47 @@ impl<RT: Runtime> RemoteFunctionRunner<RT> {
             convex_origin,
             s3_prefix,
         }
+    }
+
+    /// `Some(local)` when `FUNRUN_FALLBACK=local` and the pool has no healthy
+    /// worker.
+    fn fallback(&self, kind: FallbackKind) -> Option<&InProcessFunctionRunner<RT>> {
+        let local = self.local.as_ref()?;
+        if self.pool.has_healthy() {
+            return None;
+        }
+        log_fallback(kind);
+        Some(local)
+    }
+}
+
+/// Runs one deploy-time evaluation on a worker. Only `analyze` may
+/// answer with a user `JsError` value.
+async fn deploy(
+    pool: &Arc<WorkerPool>,
+    call: DeployCall,
+) -> anyhow::Result<Result<DeployReturn, JsError>> {
+    let up = Up::Deploy(call.try_into()?);
+    // ponytail: in process these evaluations have no outer deadline; the
+    // isolate's own user/system timeouts bound them on the worker too.
+    // This is only the conductor's safety net, so it reuses the run one.
+    let Terminal::Deploy(r) = execute_with_retries(
+        pool,
+        "_deploy",
+        RequestKind::Deploy,
+        up,
+        None,
+        None,
+        None,
+        *FUNRUN_RUN_FUNCTION_TIMEOUT,
+    )
+    .await?
+    else {
+        anyhow::bail!("worker answered a deploy request with a non-deploy frame");
+    };
+    match r.result.context("empty DeployResult")? {
+        deploy_result::Result::Json(b) => Ok(Ok(decode_return(&b)?)),
+        deploy_result::Result::JsError(e) => Ok(Err(JsError::try_from(e)?)),
     }
 }
 
@@ -189,6 +250,22 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         FunctionOutcome,
         FunctionUsageStats,
     )> {
+        if let Some(local) = self.fallback(FallbackKind::Isolate) {
+            return local
+                .run_function(
+                    udf_type,
+                    identity,
+                    ts,
+                    existing_writes,
+                    log_line_sender,
+                    function_metadata,
+                    http_action_metadata,
+                    default_system_env_vars,
+                    in_memory_index_last_modified,
+                    context,
+                )
+                .await;
+        }
         let module = match (&function_metadata, &http_action_metadata) {
             (Some(f), _) => f.path_and_args.path().udf_path.module().as_str().to_owned(),
             (None, Some(h)) => h
@@ -258,15 +335,21 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         let result = execute_with_retries(
             &self.pool,
             &module,
-            udf_type,
-            request,
+            RequestKind::Run(udf_type),
+            Up::Request(request),
             log_line_sender.as_ref(),
             http_response.as_mut(),
             http_body,
             *FUNRUN_RUN_FUNCTION_TIMEOUT,
         )
         .await
-        .and_then(|result| {
+        .and_then(|terminal| {
+            let result = match terminal {
+                Terminal::Run(r) => r,
+                other @ (Terminal::Deploy(_) | Terminal::Node(_)) => {
+                    anyhow::bail!("worker sent {other:?} for a run request")
+                },
+            };
             let RunResultParts {
                 transaction,
                 outcome,
@@ -289,9 +372,21 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         modules: BTreeMap<CanonicalizedModulePath, ModuleConfig>,
         environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
     ) -> anyhow::Result<Result<BTreeMap<CanonicalizedModulePath, AnalyzedModule>, JsError>> {
-        self.local
-            .analyze(udf_config, modules, environment_variables)
-            .await
+        if let Some(local) = self.fallback(FallbackKind::Deploy) {
+            return local
+                .analyze(udf_config, modules, environment_variables)
+                .await;
+        }
+        let call = DeployCall::Analyze {
+            udf_config,
+            modules,
+            environment_variables,
+        };
+        match deploy(&self.pool, call).await? {
+            Ok(DeployReturn::Analyze(m)) => Ok(Ok(m)),
+            Ok(other) => anyhow::bail!("worker returned {} for analyze", other.kind_name()),
+            Err(js) => Ok(Err(js)),
+        }
     }
 
     async fn evaluate_app_definitions(
@@ -302,15 +397,29 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         user_environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
         system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
     ) -> anyhow::Result<EvaluateAppDefinitionsResult> {
-        self.local
-            .evaluate_app_definitions(
-                app_definition,
-                component_definitions,
-                dependency_graph,
-                user_environment_variables,
-                system_env_vars,
-            )
-            .await
+        if let Some(local) = self.fallback(FallbackKind::Deploy) {
+            return local
+                .evaluate_app_definitions(
+                    app_definition,
+                    component_definitions,
+                    dependency_graph,
+                    user_environment_variables,
+                    system_env_vars,
+                )
+                .await;
+        }
+        let call = DeployCall::AppDefinitions {
+            app_definition,
+            component_definitions,
+            dependency_graph,
+            user_environment_variables,
+            system_env_vars,
+        };
+        match deploy(&self.pool, call).await? {
+            Ok(DeployReturn::AppDefinitions(r)) => Ok(r),
+            Ok(other) => anyhow::bail!("worker returned {} for app definitions", other.kind_name()),
+            Err(js) => anyhow::bail!("unexpected JsError from app definitions: {js}"),
+        }
     }
 
     async fn evaluate_component_initializer(
@@ -321,9 +430,26 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         args: BTreeMap<Identifier, Resource>,
         name: ComponentName,
     ) -> anyhow::Result<BTreeMap<Identifier, Resource>> {
-        self.local
-            .evaluate_component_initializer(evaluated_definitions, path, definition, args, name)
-            .await
+        if let Some(local) = self.fallback(FallbackKind::Deploy) {
+            return local
+                .evaluate_component_initializer(evaluated_definitions, path, definition, args, name)
+                .await;
+        }
+        let call = DeployCall::ComponentInitializer {
+            evaluated_definitions,
+            path,
+            definition,
+            args,
+            name,
+        };
+        match deploy(&self.pool, call).await? {
+            Ok(DeployReturn::ComponentInitializer(r)) => Ok(r),
+            Ok(other) => anyhow::bail!(
+                "worker returned {} for component initializer",
+                other.kind_name()
+            ),
+            Err(js) => anyhow::bail!("unexpected JsError from component initializer: {js}"),
+        }
     }
 
     async fn evaluate_schema(
@@ -333,9 +459,22 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         rng_seed: [u8; 32],
         unix_timestamp: UnixTimestamp,
     ) -> anyhow::Result<DatabaseSchema> {
-        self.local
-            .evaluate_schema(schema_bundle, source_map, rng_seed, unix_timestamp)
-            .await
+        if let Some(local) = self.fallback(FallbackKind::Deploy) {
+            return local
+                .evaluate_schema(schema_bundle, source_map, rng_seed, unix_timestamp)
+                .await;
+        }
+        let call = DeployCall::Schema {
+            bundle: schema_bundle,
+            source_map,
+            rng_seed,
+            unix_timestamp,
+        };
+        match deploy(&self.pool, call).await? {
+            Ok(DeployReturn::Schema(s)) => Ok(s),
+            Ok(other) => anyhow::bail!("worker returned {} for schema", other.kind_name()),
+            Err(js) => anyhow::bail!("unexpected JsError from schema: {js}"),
+        }
     }
 
     async fn evaluate_auth_config(
@@ -345,51 +484,105 @@ impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
         environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
         explanation: &str,
     ) -> anyhow::Result<AuthConfig> {
-        self.local
-            .evaluate_auth_config(
-                auth_config_bundle,
-                source_map,
-                environment_variables,
-                explanation,
-            )
-            .await
+        if let Some(local) = self.fallback(FallbackKind::Deploy) {
+            return local
+                .evaluate_auth_config(
+                    auth_config_bundle,
+                    source_map,
+                    environment_variables,
+                    explanation,
+                )
+                .await;
+        }
+        let call = DeployCall::AuthConfig {
+            bundle: auth_config_bundle,
+            source_map,
+            environment_variables,
+            explanation: explanation.to_string(),
+        };
+        match deploy(&self.pool, call).await? {
+            Ok(DeployReturn::AuthConfig(c)) => Ok(c),
+            Ok(other) => anyhow::bail!("worker returned {} for auth config", other.kind_name()),
+            Err(js) => anyhow::bail!("unexpected JsError from auth config: {js}"),
+        }
     }
 
     fn set_action_callbacks(&self, action_callbacks: Arc<dyn ActionCallbacks>) {
-        self.local.set_action_callbacks(action_callbacks);
+        // Only in-process runs call back. Deploy-time evaluation never does,
+        // so without a local runner there is nothing to set.
+        if let Some(local) = &self.local {
+            local.set_action_callbacks(action_callbacks);
+        }
     }
 }
 
 type BodyStream = BoxStream<'static, anyhow::Result<Bytes>>;
 
+/// The frame that ends an `Execute` call.
+#[derive(Debug)]
+pub(crate) enum Terminal {
+    Run(RunResult),
+    Deploy(DeployResult),
+    Node(NodeResult),
+}
+
 struct AttemptFailure {
-    stage: FailureStage,
+    delivery: Delivery,
     error: anyhow::Error,
 }
 
-/// Runs `request` on a worker, retrying on other workers only when
-/// `may_retry` allows it. Each attempt gets `run_timeout`; the gRPC deadline
-/// alone only bounds the response headers, which the worker sends at once.
-async fn execute_with_retries(
+// ponytail: a refused run waits with jittered backoff inside one request;
+// the upgrade path is a conductor-side per-pool semaphore sized to the total
+// worker capacity, so requests queue instead of polling.
+const REFUSED_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
+const REFUSED_BACKOFF_MAX: Duration = Duration::from_secs(2);
+/// Total time a dispatched request may spend backing off after refusals.
+/// Long, because failing it strands work: a scheduled action is already
+/// committed `InProgress`, so a refusal marks it `Failed`.
+const REFUSED_WAIT_BUDGET: Duration = Duration::from_secs(30);
+/// The same, for requests a caller is waiting on. Absorbs a brief burst
+/// without making a user wait; a sustained overload fails fast, as upstream
+/// does.
+const REFUSED_WAIT_BUDGET_INTERACTIVE: Duration = Duration::from_secs(1);
+
+/// How long refusals of `kind` may back off in total.
+fn refused_wait_budget(kind: RequestKind) -> Duration {
+    match kind {
+        RequestKind::Run(UdfType::Action) | RequestKind::NodeExecute => REFUSED_WAIT_BUDGET,
+        RequestKind::Run(UdfType::Query | UdfType::Mutation | UdfType::HttpAction)
+        | RequestKind::Deploy
+        | RequestKind::NodePure => REFUSED_WAIT_BUDGET_INTERACTIVE,
+    }
+}
+
+/// Runs `up` on a worker, retrying on other workers only when `may_retry`
+/// allows it. A refusal (`Overloaded` before `Started`) never ran anything,
+/// so it retries with backoff for up to `refused_wait_budget(kind)` (bounded
+/// by `run_timeout`) without using up the attempt cap. Each attempt gets
+/// `run_timeout`; the gRPC deadline alone only bounds the response headers,
+/// which the worker sends at once.
+pub(crate) async fn execute_with_retries(
     pool: &Arc<WorkerPool>,
-    module: &str,
-    udf_type: UdfType,
-    request: RunRequest,
+    affinity: &str,
+    kind: RequestKind,
+    up: Up,
     log_line_sender: Option<&mpsc::UnboundedSender<LogLine>>,
     mut http_response: Option<&mut HttpActionResponseStreamer>,
     mut http_body: Option<BodyStream>,
     run_timeout: Duration,
-) -> anyhow::Result<RunResult> {
+) -> anyhow::Result<Terminal> {
     let module_header =
-        AsciiMetadataValue::try_from(module).context("module path is not a valid header")?;
+        AsciiMetadataValue::try_from(affinity).context("module path is not a valid header")?;
     let mut exclude = BTreeSet::new();
     let mut attempt = 0;
+    let refused_deadline = tokio::time::Instant::now() + refused_wait_budget(kind).min(run_timeout);
+    let mut backoff = REFUSED_BACKOFF_INITIAL;
     loop {
         // Once every worker is excluded, fall back to all of them: in proxy
         // mode the only address is a load balancer.
         let Some((addr, client)) = pool
-            .choose(module, &exclude)
-            .or_else(|| pool.choose(module, &BTreeSet::new()))
+            .choose(affinity, &exclude)
+            .or_else(|| pool.choose(affinity, &BTreeSet::new()))
         else {
             anyhow::bail!(ErrorMetadata::overloaded(
                 "NoFunrunWorker",
@@ -401,9 +594,8 @@ async fn execute_with_retries(
             run_timeout,
             execute_once(
                 client,
-                udf_type,
                 module_header.clone(),
-                request.clone(),
+                up.clone(),
                 log_line_sender,
                 http_response.as_deref_mut(),
                 &mut http_body,
@@ -415,7 +607,7 @@ async fn execute_with_retries(
         // flight. Dropping the call cancels it on the worker.
         .map_err(|_| {
             anyhow::anyhow!(
-                "funrun worker {addr} did not finish {udf_type:?} in {module} within \
+                "funrun worker {addr} did not finish {kind:?} in {affinity} within \
                  {run_timeout:?}"
             )
         })??;
@@ -423,16 +615,30 @@ async fn execute_with_retries(
             Ok(result) => return Ok(result),
             Err(failure) => failure,
         };
-        if !may_retry(udf_type, failure.stage, attempt, *FUNRUN_CLIENT_MAX_RETRIES) {
-            return Err(failure.error);
+        let stage = failure_stage(kind, failure.delivery);
+        match failure.delivery {
+            Delivery::Refused => {
+                // ±50% jitter so refused requests do not retry in lockstep.
+                let delay = backoff.mul_f64(rand::random_range(0.5..1.5));
+                if tokio::time::Instant::now() + delay > refused_deadline {
+                    return Err(failure.error);
+                }
+                tracing::debug!("funrun worker {addr} refused {kind:?} in {affinity}; retrying");
+                tokio::time::sleep(delay).await;
+                backoff = (backoff * 2).min(REFUSED_BACKOFF_MAX);
+            },
+            Delivery::NotSent | Delivery::LostBeforeStarted | Delivery::LostAfterStarted => {
+                if !may_retry(kind, stage, attempt, *FUNRUN_CLIENT_MAX_RETRIES) {
+                    return Err(failure.error);
+                }
+                tracing::warn!(
+                    "retrying {kind:?} in {affinity}: funrun worker {addr} failed {stage:?}: {:#}",
+                    failure.error
+                );
+                attempt += 1;
+            },
         }
-        tracing::warn!(
-            "retrying {udf_type:?} in {module}: funrun worker {addr} failed {:?}: {:#}",
-            failure.stage,
-            failure.error
-        );
         exclude.insert(addr);
-        attempt += 1;
     }
 }
 
@@ -440,15 +646,14 @@ async fn execute_with_retries(
 /// the retry policy.
 async fn execute_once(
     mut client: FunrunChannel,
-    udf_type: UdfType,
     module: AsciiMetadataValue,
-    request: RunRequest,
+    up: Up,
     log_line_sender: Option<&mpsc::UnboundedSender<LogLine>>,
     mut http_response: Option<&mut HttpActionResponseStreamer>,
     http_body: &mut Option<BodyStream>,
     run_timeout: Duration,
-) -> anyhow::Result<Result<RunResult, AttemptFailure>> {
-    // Open the call with an empty request stream and send the RunRequest only
+) -> anyhow::Result<Result<Terminal, AttemptFailure>> {
+    // Open the call with an empty request stream and send the request only
     // once the worker answered with headers (it does so without waiting for
     // the first frame). A failed call therefore never delivered it.
     let (up_tx, up_rx) = mpsc::channel(8);
@@ -457,24 +662,22 @@ async fn execute_once(
     req.set_timeout(run_timeout);
     let mut down = match client.execute(req).await {
         Ok(response) => response.into_inner(),
-        // The worker never received the RunRequest: it is not sent yet.
+        // The worker never received the request: it is not sent yet.
         Err(status) if is_transport_failure(&status) => {
             return Ok(Err(AttemptFailure {
-                stage: failure_stage(udf_type, Delivery::NotSent),
+                delivery: Delivery::NotSent,
                 error: status.into_anyhow(),
             }));
         },
         Err(status) => return Err(status.into_anyhow()),
     };
-    let request = ExecuteUp {
-        inner: Some(Up::Request(request)),
-    };
-    // A failed send means the call already ended and the RunRequest was not
+    let request = ExecuteUp { inner: Some(up) };
+    // A failed send means the call already ended and the request was not
     // handed to it, so nothing was sent.
     if up_tx.send(request).await.is_err() {
         return Ok(Err(AttemptFailure {
-            stage: failure_stage(udf_type, Delivery::NotSent),
-            error: anyhow::anyhow!("funrun Execute stream closed before the RunRequest was sent"),
+            delivery: Delivery::NotSent,
+            error: anyhow::anyhow!("funrun Execute stream closed before the request was sent"),
         }));
     }
     // Held until the body pump takes it, so the request half stays open.
@@ -502,14 +705,14 @@ async fn execute_once(
                 let inner = match frame {
                     Err(status) if is_transport_failure(&status) => {
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, lost(started)),
+                            delivery: lost(started),
                             error: status.into_anyhow(),
                         }));
                     },
                     Err(status) => return Err(status.into_anyhow()),
                     Ok(None) => {
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, lost(started)),
+                            delivery: lost(started),
                             error: anyhow::anyhow!("funrun Execute stream ended without a result"),
                         }));
                     },
@@ -551,11 +754,13 @@ async fn execute_once(
                         };
                         let error = ErrorMetadata::overloaded("FunrunWorkerOverloaded", reason);
                         return Ok(Err(AttemptFailure {
-                            stage: failure_stage(udf_type, delivery),
+                            delivery,
                             error: error.into(),
                         }));
                     },
-                    Down::Result(result) => return Ok(Ok(result)),
+                    Down::Result(r) => return Ok(Ok(Terminal::Run(r))),
+                    Down::DeployResult(r) => return Ok(Ok(Terminal::Deploy(r))),
+                    Down::NodeResult(r) => return Ok(Ok(Terminal::Node(r))),
                 }
             },
             Some(()) = OptionFuture::from(pump.as_mut()) => pump = None,
@@ -592,10 +797,10 @@ async fn pump_body(mut body: BodyStream, up: mpsc::Sender<ExecuteUp>) {
     }
 }
 
+/// A scripted fake funrun worker, shared by this crate's tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_util {
     use std::{
-        collections::BTreeSet,
         sync::{
             atomic::{
                 AtomicUsize,
@@ -606,12 +811,7 @@ mod tests {
         time::Duration,
     };
 
-    use bytes::Bytes;
-    use common::{
-        grpc::ConvexGrpcService,
-        types::UdfType,
-    };
-    use errors::ErrorMetadataAnyhowExt;
+    use common::grpc::ConvexGrpcService;
     use futures::{
         stream::BoxStream,
         StreamExt,
@@ -628,18 +828,11 @@ mod tests {
         ExecuteDown,
         ExecuteUp,
         LoadReport,
-        Overloaded,
-        RunRequest,
-        RunResult,
-        Started,
         WatchLoadRequest,
     };
-    use tokio::{
-        net::{
-            TcpSocket,
-            TcpStream,
-        },
-        sync::mpsc,
+    use tokio::net::{
+        TcpSocket,
+        TcpStream,
     };
     use tonic::{
         Request,
@@ -647,23 +840,19 @@ mod tests {
         Status,
         Streaming,
     };
-    use udf::{
-        HttpActionResponsePart,
-        HttpActionResponseStreamer,
-    };
 
-    use super::execute_with_retries;
     use crate::pool::{
         connect_for_test,
         WorkerPool,
     };
 
-    type Frame = Result<Down, Status>;
+    pub(crate) type Frame = Result<Down, Status>;
 
-    /// Long enough that only the run-timeout test ever hits it.
-    const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+    pub(crate) fn down(inner: Down) -> Frame {
+        Ok(inner)
+    }
 
-    enum Step {
+    pub(crate) enum Step {
         Send(Frame),
         /// Counts an up frame arriving within 100ms as early.
         ExpectQuiet,
@@ -675,26 +864,37 @@ mod tests {
 
     /// `Ok(steps)`: answer with headers at once, like the real worker, then
     /// read the RunRequest and play `steps`. `Err(status)`: reject the call.
-    type Script = fn(usize) -> Result<Vec<Step>, Status>;
+    pub(crate) type Script = Arc<dyn Fn(usize) -> Result<Vec<Step>, Status> + Send + Sync>;
 
     /// Answers the n-th Execute call (from 0) with `script(n)`, counting calls
-    /// and RunRequests received.
+    /// and requests (run, deploy or node) received.
     #[derive(Clone)]
-    struct FakeWorker {
-        calls: Arc<AtomicUsize>,
-        requests: Arc<AtomicUsize>,
-        early: Arc<AtomicUsize>,
-        bodies: Arc<Mutex<Vec<BodyChunk>>>,
-        grpc_timeouts: Arc<Mutex<Vec<String>>>,
+    pub(crate) struct FakeWorker {
+        pub(crate) calls: Arc<AtomicUsize>,
+        pub(crate) requests: Arc<AtomicUsize>,
+        pub(crate) early: Arc<AtomicUsize>,
+        pub(crate) bodies: Arc<Mutex<Vec<BodyChunk>>>,
+        pub(crate) grpc_timeouts: Arc<Mutex<Vec<String>>>,
+        /// The last request frame received.
+        pub(crate) last_request: Arc<Mutex<Option<Up>>>,
         script: Script,
     }
 
-    async fn read_request(up: &mut Streaming<ExecuteUp>, requests: &AtomicUsize) {
-        if let Ok(Some(ExecuteUp {
-            inner: Some(Up::Request(_)),
-        })) = up.message().await
-        {
-            requests.fetch_add(1, Ordering::SeqCst);
+    /// Reads the first up frame and, when it is a request, counts and
+    /// returns it.
+    pub(crate) async fn read_request(
+        up: &mut Streaming<ExecuteUp>,
+        requests: &AtomicUsize,
+    ) -> Option<Up> {
+        let Ok(Some(ExecuteUp { inner: Some(inner) })) = up.message().await else {
+            return None;
+        };
+        match inner {
+            Up::Request(_) | Up::Deploy(_) | Up::Node(_) => {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Some(inner)
+            },
+            Up::HttpRequestBody(_) => None,
         }
     }
 
@@ -728,7 +928,9 @@ mod tests {
                 Ok(steps) => {
                     let fake = self.clone();
                     let stream = futures::stream::once(async move {
-                        read_request(&mut up, &requests).await;
+                        if let Some(r) = read_request(&mut up, &requests).await {
+                            *fake.last_request.lock() = Some(r);
+                        }
                         futures::stream::unfold(
                             (up, steps.into_iter()),
                             move |(mut up, mut steps)| {
@@ -785,19 +987,17 @@ mod tests {
         }
     }
 
-    async fn start_fake(script: Script) -> (String, Arc<AtomicUsize>) {
-        let (addr, fake) = start_fake_worker(script).await;
-        (addr, fake.calls)
-    }
-
-    async fn start_fake_worker(script: Script) -> (String, FakeWorker) {
+    pub(crate) async fn start_fake_worker(
+        script: impl Fn(usize) -> Result<Vec<Step>, Status> + Send + Sync + 'static,
+    ) -> (String, FakeWorker) {
         let fake = FakeWorker {
             calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(AtomicUsize::new(0)),
             early: Arc::new(AtomicUsize::new(0)),
             bodies: Arc::new(Mutex::new(Vec::new())),
             grpc_timeouts: Arc::new(Mutex::new(Vec::new())),
-            script,
+            last_request: Arc::new(Mutex::new(None)),
+            script: Arc::new(script),
         };
         let socket = TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -818,12 +1018,197 @@ mod tests {
         (addr.to_string(), fake)
     }
 
-    fn pool_of(addrs: &[&str]) -> Arc<WorkerPool> {
+    pub(crate) fn pool_of(addrs: &[&str]) -> Arc<WorkerPool> {
         let pool = WorkerPool::empty();
         for addr in addrs {
             pool.insert_healthy(addr.to_string(), connect_for_test(addr));
         }
         pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{
+            BTreeMap,
+            BTreeSet,
+        },
+        sync::{
+            atomic::{
+                AtomicUsize,
+                Ordering,
+            },
+            Arc,
+        },
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+    use common::{
+        auth::AuthConfig,
+        errors::JsError,
+        runtime::UnixTimestamp,
+        types::UdfType,
+    };
+    use errors::ErrorMetadataAnyhowExt;
+    use funrun_proto::deploy::{
+        DeployCall,
+        DeployReturn,
+    };
+    use futures::StreamExt;
+    use model::{
+        modules::module_versions::ModuleSource,
+        udf_config::types::UdfConfig,
+    };
+    use pb_funrun::funrun::{
+        deploy_result,
+        execute_down::Inner as Down,
+        execute_up::Inner as Up,
+        BodyChunk,
+        DeployRequest,
+        DeployResult,
+        Overloaded,
+        RunRequest,
+        RunResult,
+        Started,
+    };
+    use tokio::sync::mpsc;
+    use tonic::Status;
+    use udf::{
+        HttpActionResponsePart,
+        HttpActionResponseStreamer,
+    };
+
+    use super::{
+        execute_with_retries,
+        Terminal,
+    };
+    use crate::{
+        pool::WorkerPool,
+        retry::RequestKind,
+        test_util::{
+            down,
+            pool_of,
+            start_fake_worker,
+            Frame,
+            Step,
+        },
+    };
+
+    /// Long enough that only the run-timeout test ever hits it.
+    const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn start_fake(
+        script: fn(usize) -> Result<Vec<Step>, Status>,
+    ) -> (String, Arc<AtomicUsize>) {
+        let (addr, fake) = start_fake_worker(script).await;
+        (addr, fake.calls)
+    }
+
+    fn auth_call() -> anyhow::Result<DeployRequest> {
+        DeployCall::AuthConfig {
+            bundle: ModuleSource::new("x"),
+            source_map: None,
+            environment_variables: BTreeMap::new(),
+            explanation: "e".into(),
+        }
+        .try_into()
+    }
+
+    fn auth_result() -> anyhow::Result<Frame> {
+        let ret = Vec::<u8>::try_from(DeployReturn::AuthConfig(AuthConfig { providers: vec![] }))?;
+        Ok(down(Down::DeployResult(DeployResult {
+            result: Some(deploy_result::Result::Json(ret)),
+        })))
+    }
+
+    #[tokio::test]
+    async fn deploy_round_trips_through_worker() -> anyhow::Result<()> {
+        let (addr, fake) = start_fake_worker(move |_| {
+            Ok(vec![
+                Step::Send(down(Down::Started(Default::default()))),
+                Step::Send(auth_result().unwrap()),
+            ])
+        })
+        .await;
+        let pool = pool_of(&[&addr]);
+        let terminal = execute_with_retries(
+            &pool,
+            "_deploy",
+            RequestKind::Deploy,
+            Up::Deploy(auth_call()?),
+            None,
+            None,
+            None,
+            Duration::from_secs(5),
+        )
+        .await?;
+        assert!(matches!(terminal, Terminal::Deploy(_)));
+        assert!(matches!(*fake.last_request.lock(), Some(Up::Deploy(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn analyze_js_error_comes_back_as_a_user_error() -> anyhow::Result<()> {
+        // What a push with a syntax error sees: the worker's JsError is the
+        // `Err(JsError)` value, as in process, not an internal error.
+        let (addr, _fake) = start_fake_worker(move |_| {
+            let js = JsError::from_message("Uncaught SyntaxError: bad".into());
+            Ok(vec![Step::Send(down(Down::DeployResult(DeployResult {
+                result: Some(deploy_result::Result::JsError(js.try_into().unwrap())),
+            })))])
+        })
+        .await;
+        let pool = pool_of(&[&addr]);
+        let call = DeployCall::Analyze {
+            udf_config: UdfConfig {
+                server_version: "1.0.0".parse()?,
+                import_phase_rng_seed: [0; 32],
+                import_phase_unix_timestamp: UnixTimestamp::from_millis(0),
+            },
+            modules: BTreeMap::new(),
+            environment_variables: BTreeMap::new(),
+        };
+
+        let Err(js) = super::deploy(&pool, call).await? else {
+            anyhow::bail!("analyze should return the JsError");
+        };
+
+        assert_eq!(js.message, "Uncaught SyntaxError: bad");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deploy_retries_after_started_stream_loss() -> anyhow::Result<()> {
+        // Same technique as `mutation_is_retried_after_started`: attempt 0
+        // ends the stream after `Started`, attempt 1 answers. (A stall would
+        // hit the run timeout, which is final.)
+        let (addr, fake) = start_fake_worker(move |attempt| match attempt {
+            0 => Ok(vec![Step::Send(down(Down::Started(Default::default())))]),
+            _ => Ok(vec![Step::Send(auth_result().unwrap())]),
+        })
+        .await;
+        let pool = pool_of(&[&addr]);
+        let t = execute_with_retries(
+            &pool,
+            "_deploy",
+            RequestKind::Deploy,
+            Up::Deploy(auth_call()?),
+            None,
+            None,
+            None,
+            Duration::from_secs(5),
+        )
+        .await?;
+        assert!(matches!(t, Terminal::Deploy(_)));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_pool_has_no_healthy_worker() {
+        assert!(!WorkerPool::empty().has_healthy());
     }
 
     async fn run(
@@ -831,17 +1216,21 @@ mod tests {
         module: &str,
         udf_type: UdfType,
     ) -> anyhow::Result<RunResult> {
-        execute_with_retries(
+        match execute_with_retries(
             pool,
             module,
-            udf_type,
-            RunRequest::default(),
+            RequestKind::Run(udf_type),
+            Up::Request(RunRequest::default()),
             None,
             None,
             None,
             RUN_TIMEOUT,
         )
-        .await
+        .await?
+        {
+            Terminal::Run(r) => Ok(r),
+            Terminal::Deploy(_) | Terminal::Node(_) => anyhow::bail!("not a run result"),
+        }
     }
 
     fn overloaded(_: usize) -> Result<Vec<Step>, Status> {
@@ -931,6 +1320,40 @@ mod tests {
         assert_eq!(idle_calls.load(Ordering::SeqCst), 1);
     }
 
+    fn overloaded_six_times_then_succeeds(call: usize) -> Result<Vec<Step>, Status> {
+        if call < 6 {
+            overloaded(call)
+        } else {
+            succeeds(call)
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_query_gives_up_while_an_action_keeps_retrying() {
+        // The same worker, the same refusals: reaching the 7th call needs at
+        // least 1.5s of backoff, more than a query's budget.
+        let (addr, calls) = start_fake(overloaded_six_times_then_succeeds).await;
+        let pool = pool_of(&[&addr]);
+
+        let err = run(&pool, "m.js", UdfType::Query).await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("full"), "{err:#}");
+        assert!(calls.load(Ordering::SeqCst) < 7, "a query waited too long");
+    }
+
+    #[tokio::test]
+    async fn refused_action_backs_off_past_the_attempt_cap() {
+        // One worker that is full for longer than the attempt cap (5 calls)
+        // allows: refusals back off and keep trying instead.
+        let (addr, calls) = start_fake(overloaded_six_times_then_succeeds).await;
+        let pool = pool_of(&[&addr]);
+
+        let result = run(&pool, "m.js", UdfType::Action).await.unwrap();
+
+        assert_eq!(result, RunResult::default());
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
+    }
+
     #[tokio::test]
     async fn action_is_not_retried_after_started() {
         let (addr, calls) = start_fake(drops_after_start).await;
@@ -1013,8 +1436,8 @@ mod tests {
         let run = execute_with_retries(
             &pool,
             "m.js",
-            UdfType::Query,
-            RunRequest::default(),
+            RequestKind::Run(UdfType::Query),
+            Up::Request(RunRequest::default()),
             None,
             None,
             None,
@@ -1048,11 +1471,11 @@ mod tests {
         let mut streamer = HttpActionResponseStreamer::new(tx);
         let body = futures::stream::iter([Ok(Bytes::from("pi")), Ok(Bytes::from("ng"))]).boxed();
 
-        let result = execute_with_retries(
+        let terminal = execute_with_retries(
             &pool,
             "m.js",
-            UdfType::HttpAction,
-            RunRequest::default(),
+            RequestKind::Run(UdfType::HttpAction),
+            Up::Request(RunRequest::default()),
             None,
             Some(&mut streamer),
             Some(body),
@@ -1061,7 +1484,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result, RunResult::default());
+        assert!(matches!(terminal, Terminal::Run(r) if r == RunResult::default()));
         // Nothing reached the worker before it sent `Started`.
         assert_eq!(fake.early.load(Ordering::SeqCst), 0);
         let chunk = |data: &[u8], end| BodyChunk {
@@ -1090,8 +1513,8 @@ mod tests {
         let run = execute_with_retries(
             &pool,
             "m.js",
-            UdfType::HttpAction,
-            RunRequest::default(),
+            RequestKind::Run(UdfType::HttpAction),
+            Up::Request(RunRequest::default()),
             None,
             Some(&mut streamer),
             None,

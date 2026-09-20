@@ -1600,7 +1600,7 @@ pub static SEARCH_COMPACTOR_INITIAL_BACKOFF: LazyLock<Duration> =
 /// wire encoding can be 3-4x that, so we set a higher limit here.
 ///
 /// Note that analyze has a much higher limit because it includes user source
-/// code.
+/// code; see `MAX_FUNRUN_DEPLOY_MESSAGE_SIZE`.
 pub static MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
     env_config(
         "MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE",
@@ -1613,6 +1613,14 @@ pub static MAX_FUNRUN_RUN_FUNCTION_REQUEST_MESSAGE_SIZE: LazyLock<usize> = LazyL
 /// MiB buffer for the smaller fields.
 pub static MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE: LazyLock<usize> =
     LazyLock::new(|| env_config("MAX_FUNRUN_RUN_FUNCTION_RESPONSE_MESSAGE_SIZE", 1 << 26)); // 64 MiB
+
+/// The maximum size for Funrun deploy-time (`Deploy` frame) messages. Analyze
+/// carries the push's whole module source, so this must clear `MAX_PUSH_BYTES`
+/// (200MB) or a push that succeeds with `FUNCTION_RUNNER=local` fails with
+/// `remote`. One channel serves both frame kinds, so the larger of this and
+/// the run-function limit wins.
+pub static MAX_FUNRUN_DEPLOY_MESSAGE_SIZE: LazyLock<usize> =
+    LazyLock::new(|| env_config("MAX_FUNRUN_DEPLOY_MESSAGE_SIZE", 1 << 28)); // 256 MiB
 
 /// The maximum size for Backend HTTP and GRPC action callbacks. This is 8MiB
 /// for path and args, plus a generous buffer for the smaller fields This should

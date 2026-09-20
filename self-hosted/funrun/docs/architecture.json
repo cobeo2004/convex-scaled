@@ -2,179 +2,207 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Convex Scaled Architecture",
-    "output": "self-hosted/funrun/docs/architecture.html",
-    "quality_profile": "showcase"
+    "title": "Convex funrun topology",
+    "quality_profile": "showcase",
+    "viewBox": [1100, 450],
+    "views": [
+      {
+        "id": "dispatch",
+        "label": "Function dispatch",
+        "focus": ["client", "conductor", "funrun", "isoworker"],
+        "note": "A query, mutation or action leaves the conductor and executes in a worker isolate."
+      },
+      {
+        "id": "callbacks",
+        "label": "Callbacks and state",
+        "focus": ["isoworker", "funhost", "conductor", "pg"],
+        "note": "Workers hold no database; every read and write travels back to the conductor."
+      },
+      {
+        "id": "node-pool",
+        "label": "Node action pool",
+        "focus": ["funrun", "nodeworker", "conductor"],
+        "note": "The opt-in pool that runs \"use node\" actions in real Node.js processes."
+      }
+    ]
   },
   "components": [
-    {
-      "id": "clients",
-      "type": "external",
-      "label": "Convex Clients",
-      "sublabel": "SDK · HTTP actions",
-      "pos": [40, 280],
-      "size": [140, 62]
-    },
     {
       "id": "dashboard",
       "type": "frontend",
       "label": "Dashboard",
-      "sublabel": ":6791",
-      "pos": [40, 470],
-      "size": [140, 62]
+      "sublabel": "Workers page",
+      "pos": [40, 50],
+      "size": [160, 66]
+    },
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Convex client",
+      "sublabel": "queries · deploy",
+      "pos": [40, 218],
+      "size": [160, 66]
+    },
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "documents",
+      "pos": [40, 330],
+      "size": [160, 72]
     },
     {
       "id": "conductor",
       "type": "backend",
       "label": "Conductor",
-      "sublabel": "sync · OCC · commits",
-      "pos": [270, 280],
-      "size": [150, 62],
-      "tag": ":3210 / :3211"
+      "sublabel": "convex-local-backend",
+      "pos": [290, 168],
+      "size": [200, 98],
+      "tag": "FUNCTION_RUNNER=remote"
     },
     {
-      "id": "runner",
-      "type": "backend",
-      "label": "RemoteFunctionRunner",
-      "sublabel": "pick · retry · timeout",
-      "pos": [500, 160],
-      "size": [180, 62]
+      "id": "s3",
+      "type": "cloud",
+      "label": "RustFS / S3",
+      "sublabel": "modules · files",
+      "pos": [290, 330],
+      "size": [200, 72]
     },
     {
-      "id": "host",
+      "id": "funhost",
       "type": "backend",
       "label": "FunctionHost",
-      "sublabel": "gRPC :7401",
-      "pos": [500, 400],
-      "size": [180, 62]
+      "sublabel": "worker-facing gRPC",
+      "pos": [560, 52],
+      "size": [190, 78],
+      "tag": "reads + callbacks"
     },
     {
-      "id": "envoy",
-      "type": "cloud",
-      "label": "Envoy",
-      "sublabel": "proxy mode only",
-      "pos": [770, 40],
-      "size": [140, 62]
-    },
-    {
-      "id": "workers",
+      "id": "funrun",
       "type": "backend",
-      "label": "funrun_worker × N",
-      "sublabel": "V8 isolates · :7400",
-      "pos": [1000, 280],
-      "size": [180, 70],
-      "tag": "stateless"
+      "label": "WorkerPool client",
+      "sublabel": "pick · retry · health",
+      "pos": [560, 168],
+      "size": [190, 98],
+      "tag": "one pool per kind"
     },
     {
-      "id": "postgres",
-      "type": "database",
-      "label": "Postgres",
-      "sublabel": "documents · indexes",
-      "pos": [270, 560],
-      "size": [150, 62]
+      "id": "isoworker",
+      "type": "backend",
+      "label": "Isolate workers",
+      "sublabel": "FUNRUN_KIND=isolate",
+      "pos": [860, 52],
+      "size": [190, 86],
+      "tag": "V8 · stateless"
     },
     {
-      "id": "rustfs",
-      "type": "database",
-      "label": "RustFS (S3)",
-      "sublabel": "modules · files",
-      "pos": [1000, 560],
-      "size": [180, 62]
+      "id": "nodeworker",
+      "type": "backend",
+      "label": "Node workers",
+      "sublabel": "FUNRUN_KIND=node",
+      "pos": [860, 178],
+      "size": [190, 86],
+      "tag": "Node.js · stateless"
     }
   ],
   "boundaries": [
     {
-      "kind": "security-group",
-      "label": "conductor process (upstream local_backend)",
-      "wraps": ["conductor", "runner", "host"],
-      "pad": 18
+      "kind": "region",
+      "label": "Conductor process — owns all state",
+      "wraps": ["conductor", "funhost", "funrun"]
     },
     {
       "kind": "region",
-      "label": "scale out",
-      "wraps": ["workers"],
-      "pad": 18
+      "label": "Stateless worker pools",
+      "wraps": ["isoworker", "nodeworker"]
     }
   ],
   "connections": [
     {
-      "from": "clients",
+      "id": "client-in",
+      "from": "client",
       "to": "conductor",
-      "label": "WebSocket · HTTP",
-      "variant": "emphasis"
+      "label": "HTTPS",
+      "variant": "emphasis",
+      "labelDy": -4
     },
     {
+      "id": "dash-status",
       "from": "dashboard",
       "to": "conductor",
-      "label": "admin API"
-    },
-    {
-      "from": "conductor",
-      "to": "runner",
-      "label": "run_function"
-    },
-    {
-      "from": "runner",
-      "to": "workers",
-      "label": "Execute stream",
-      "variant": "emphasis"
-    },
-    {
-      "from": "runner",
-      "to": "envoy",
-      "label": "proxy",
-      "variant": "dashed"
-    },
-    {
-      "from": "envoy",
-      "to": "workers",
-      "variant": "dashed"
-    },
-    {
-      "from": "workers",
-      "to": "host",
-      "label": "IndexPage · callbacks",
+      "label": "status JSON",
       "variant": "security"
     },
     {
+      "id": "trait-call",
       "from": "conductor",
-      "to": "postgres",
-      "label": "commit · read",
-      "labelAt": [345, 455]
+      "to": "funrun",
+      "label": "dispatch",
+      "variant": "emphasis"
     },
     {
-      "from": "workers",
-      "to": "rustfs",
-      "label": "load modules",
-      "labelAt": [1090, 455]
+      "id": "iso-dispatch",
+      "from": "funrun",
+      "to": "isoworker",
+      "label": "Execute",
+      "variant": "emphasis"
+    },
+    {
+      "id": "node-dispatch",
+      "from": "funrun",
+      "to": "nodeworker",
+      "label": "Up::Node",
+      "labelDy": 18
+    },
+    {
+      "id": "iso-callback",
+      "from": "isoworker",
+      "to": "funhost",
+      "label": "syscalls"
+    },
+    {
+      "id": "sql",
+      "from": "conductor",
+      "to": "pg",
+      "label": "SQL",
+      "labelDy": 24
+    },
+    {
+      "id": "files",
+      "from": "conductor",
+      "to": "s3",
+      "label": "files",
+      "labelDy": 24
     }
   ],
   "cards": [
     {
       "dot": "cyan",
-      "title": "Conductor keeps the core",
+      "title": "Why it splits this way",
       "items": [
-        "Lease, OCC, commits and every index read stay in upstream local_backend",
-        "Only run_function leaves the process",
-        "FUNCTION_RUNNER=local runs it all in process, unchanged"
+        "The conductor keeps the database, storage, scheduler and every HTTP route.",
+        "Workers hold no state, so a pool scales by adding containers.",
+        "Remote mode requires shared S3 storage: workers load user modules from it directly.",
+        "FUNCTION_RUNNER=local collapses the whole right side back into the conductor."
       ]
     },
     {
       "dot": "emerald",
-      "title": "Workers scale out",
+      "title": "Two pools, two runtimes",
       "items": [
-        "Stateless: modules come from S3, reads from FunctionHost",
-        "Picked by module affinity and reported load (WatchLoad)",
-        "Direct DNS routing, or one address behind Envoy"
+        "Isolate workers run queries, mutations, actions and deploy-time evaluation in V8.",
+        "Node workers run \"use node\" actions in real Node.js, for npm and node builtins.",
+        "The node pool is opt-in: unset FUNRUN_NODE_WORKERS and those actions stay on the conductor."
       ]
     },
     {
-      "dot": "rose",
-      "title": "Safety",
+      "dot": "amber",
+      "title": "Routing and failure",
       "items": [
-        "Per-direction bearer tokens derived from INSTANCE_SECRET",
-        "Protocol version checked both ways",
-        "An action is retried only if it provably never started"
+        "Direct routing resolves the pool over DNS; proxy routing puts Envoy in front instead.",
+        "Isolate workers call back over gRPC; node workers use FUNRUN_NODE_CALLBACK_ORIGIN, and ctx.storage fetches CONVEX_CLOUD_ORIGIN directly.",
+        "A pool with no healthy worker either fails fast or falls back in-process, per FUNRUN_FALLBACK.",
+        "Work that may already have started is never retried unless it is pure."
       ]
     }
   ]

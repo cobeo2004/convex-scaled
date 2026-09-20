@@ -83,6 +83,7 @@ model = { workspace = true }
 moka = { workspace = true }
 node_executor = { workspace = true }
 parking_lot = { workspace = true }
+performance_stats = { workspace = true }
 remote_function_runner = { workspace = true }
 reqwest = { workspace = true }
 roles = { workspace = true }
