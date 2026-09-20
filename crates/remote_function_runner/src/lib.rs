@@ -536,13 +536,29 @@ struct AttemptFailure {
 // worker capacity, so requests queue instead of polling.
 const REFUSED_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
 const REFUSED_BACKOFF_MAX: Duration = Duration::from_secs(2);
-/// Total time a request may spend backing off after refusals.
+/// Total time a dispatched request may spend backing off after refusals.
+/// Long, because failing it strands work: a scheduled action is already
+/// committed `InProgress`, so a refusal marks it `Failed`.
 const REFUSED_WAIT_BUDGET: Duration = Duration::from_secs(30);
+/// The same, for requests a caller is waiting on. Absorbs a brief burst
+/// without making a user wait; a sustained overload fails fast, as upstream
+/// does.
+const REFUSED_WAIT_BUDGET_INTERACTIVE: Duration = Duration::from_secs(1);
+
+/// How long refusals of `kind` may back off in total.
+fn refused_wait_budget(kind: RequestKind) -> Duration {
+    match kind {
+        RequestKind::Run(UdfType::Action) | RequestKind::NodeExecute => REFUSED_WAIT_BUDGET,
+        RequestKind::Run(UdfType::Query | UdfType::Mutation | UdfType::HttpAction)
+        | RequestKind::Deploy
+        | RequestKind::NodePure => REFUSED_WAIT_BUDGET_INTERACTIVE,
+    }
+}
 
 /// Runs `up` on a worker, retrying on other workers only when `may_retry`
 /// allows it. A refusal (`Overloaded` before `Started`) never ran anything,
-/// so it retries with backoff for up to `REFUSED_WAIT_BUDGET` (bounded by
-/// `run_timeout`) without using up the attempt cap. Each attempt gets
+/// so it retries with backoff for up to `refused_wait_budget(kind)` (bounded
+/// by `run_timeout`) without using up the attempt cap. Each attempt gets
 /// `run_timeout`; the gRPC deadline alone only bounds the response headers,
 /// which the worker sends at once.
 pub(crate) async fn execute_with_retries(
@@ -559,7 +575,7 @@ pub(crate) async fn execute_with_retries(
         AsciiMetadataValue::try_from(affinity).context("module path is not a valid header")?;
     let mut exclude = BTreeSet::new();
     let mut attempt = 0;
-    let refused_deadline = tokio::time::Instant::now() + REFUSED_WAIT_BUDGET.min(run_timeout);
+    let refused_deadline = tokio::time::Instant::now() + refused_wait_budget(kind).min(run_timeout);
     let mut backoff = REFUSED_BACKOFF_INITIAL;
     loop {
         // Once every worker is excluded, fall back to all of them: in proxy
@@ -1310,6 +1326,19 @@ mod tests {
         } else {
             succeeds(call)
         }
+    }
+
+    #[tokio::test]
+    async fn refused_query_gives_up_while_an_action_keeps_retrying() {
+        // The same worker, the same refusals: reaching the 7th call needs at
+        // least 1.5s of backoff, more than a query's budget.
+        let (addr, calls) = start_fake(overloaded_six_times_then_succeeds).await;
+        let pool = pool_of(&[&addr]);
+
+        let err = run(&pool, "m.js", UdfType::Query).await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("full"), "{err:#}");
+        assert!(calls.load(Ordering::SeqCst) < 7, "a query waited too long");
     }
 
     #[tokio::test]
