@@ -8,42 +8,23 @@
       {
         "id": "happy",
         "label": "Happy path",
-        "focus": [
-          "incoming",
-          "mode",
-          "healthy",
-          "pick",
-          "stream",
-          "respond"
-        ],
+        "focus": ["incoming", "mode", "healthy", "pick", "stream", "respond"],
         "note": "Remote mode, a healthy pool, one attempt, one result."
       },
       {
         "id": "no-worker",
         "label": "No healthy worker",
-        "focus": [
-          "healthy",
-          "inproc",
-          "respond"
-        ],
+        "focus": ["healthy", "inproc", "respond"],
         "note": "FUNRUN_FALLBACK decides between failing the call and running it in-process."
       },
       {
         "id": "recover",
         "label": "Failure and retry",
-        "focus": [
-          "stream",
-          "classify",
-          "pick",
-          "giveup"
-        ],
+        "focus": ["stream", "classify", "pick", "giveup"],
         "note": "What the conductor may safely re-send, and when it stops trying."
       }
     ],
-    "viewBox": [
-      1190,
-      660
-    ]
+    "viewBox": [1190, 660]
   },
   "lanes": [
     {
@@ -85,14 +66,7 @@
       "toCol": 5
     }
   ],
-  "mainPath": [
-    "incoming",
-    "mode",
-    "healthy",
-    "pick",
-    "stream",
-    "respond"
-  ],
+  "mainPath": ["incoming", "mode", "healthy", "pick", "stream", "respond"],
   "nodes": [
     {
       "id": "incoming",

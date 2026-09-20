@@ -107,3 +107,5 @@ npm-packages/docs/src/generated/screenshotManifest.ts
 npm-packages-private/postalservice/postalservice-openapi.yaml
 # Vendored from Resend
 crates_private/resend_client/resend-openapi.yaml
+# Rendered by `archify deliver` from the .json next to each one
+self-hosted/funrun/docs/*.html

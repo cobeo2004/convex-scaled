@@ -4,41 +4,24 @@
   "meta": {
     "title": "Convex funrun topology",
     "quality_profile": "showcase",
-    "viewBox": [
-      1100,
-      450
-    ],
+    "viewBox": [1100, 450],
     "views": [
       {
         "id": "dispatch",
         "label": "Function dispatch",
-        "focus": [
-          "client",
-          "conductor",
-          "funrun",
-          "isoworker"
-        ],
+        "focus": ["client", "conductor", "funrun", "isoworker"],
         "note": "A query, mutation or action leaves the conductor and executes in a worker isolate."
       },
       {
         "id": "callbacks",
         "label": "Callbacks and state",
-        "focus": [
-          "isoworker",
-          "funhost",
-          "conductor",
-          "pg"
-        ],
+        "focus": ["isoworker", "funhost", "conductor", "pg"],
         "note": "Workers hold no database; every read and write travels back to the conductor."
       },
       {
         "id": "node-pool",
         "label": "Node action pool",
-        "focus": [
-          "funrun",
-          "nodeworker",
-          "conductor"
-        ],
+        "focus": ["funrun", "nodeworker", "conductor"],
         "note": "The opt-in pool that runs \"use node\" actions in real Node.js processes."
       }
     ]
@@ -49,56 +32,32 @@
       "type": "frontend",
       "label": "Dashboard",
       "sublabel": "Workers page",
-      "pos": [
-        40,
-        50
-      ],
-      "size": [
-        160,
-        66
-      ]
+      "pos": [40, 50],
+      "size": [160, 66]
     },
     {
       "id": "client",
       "type": "external",
       "label": "Convex client",
       "sublabel": "queries · deploy",
-      "pos": [
-        40,
-        218
-      ],
-      "size": [
-        160,
-        66
-      ]
+      "pos": [40, 218],
+      "size": [160, 66]
     },
     {
       "id": "pg",
       "type": "database",
       "label": "PostgreSQL",
       "sublabel": "documents",
-      "pos": [
-        40,
-        330
-      ],
-      "size": [
-        160,
-        72
-      ]
+      "pos": [40, 330],
+      "size": [160, 72]
     },
     {
       "id": "conductor",
       "type": "backend",
       "label": "Conductor",
       "sublabel": "convex-local-backend",
-      "pos": [
-        290,
-        168
-      ],
-      "size": [
-        200,
-        98
-      ],
+      "pos": [290, 168],
+      "size": [200, 98],
       "tag": "FUNCTION_RUNNER=remote"
     },
     {
@@ -106,28 +65,16 @@
       "type": "cloud",
       "label": "RustFS / S3",
       "sublabel": "modules · files",
-      "pos": [
-        290,
-        330
-      ],
-      "size": [
-        200,
-        72
-      ]
+      "pos": [290, 330],
+      "size": [200, 72]
     },
     {
       "id": "funhost",
       "type": "backend",
       "label": "FunctionHost",
       "sublabel": "worker-facing gRPC",
-      "pos": [
-        560,
-        52
-      ],
-      "size": [
-        190,
-        78
-      ],
+      "pos": [560, 52],
+      "size": [190, 78],
       "tag": "reads + callbacks"
     },
     {
@@ -135,14 +82,8 @@
       "type": "backend",
       "label": "WorkerPool client",
       "sublabel": "pick · retry · health",
-      "pos": [
-        560,
-        168
-      ],
-      "size": [
-        190,
-        98
-      ],
+      "pos": [560, 168],
+      "size": [190, 98],
       "tag": "one pool per kind"
     },
     {
@@ -150,14 +91,8 @@
       "type": "backend",
       "label": "Isolate workers",
       "sublabel": "FUNRUN_KIND=isolate",
-      "pos": [
-        860,
-        52
-      ],
-      "size": [
-        190,
-        86
-      ],
+      "pos": [860, 52],
+      "size": [190, 86],
       "tag": "V8 · stateless"
     },
     {
@@ -165,14 +100,8 @@
       "type": "backend",
       "label": "Node workers",
       "sublabel": "FUNRUN_KIND=node",
-      "pos": [
-        860,
-        178
-      ],
-      "size": [
-        190,
-        86
-      ],
+      "pos": [860, 178],
+      "size": [190, 86],
       "tag": "Node.js · stateless"
     }
   ],
@@ -180,19 +109,12 @@
     {
       "kind": "region",
       "label": "Conductor process — owns all state",
-      "wraps": [
-        "conductor",
-        "funhost",
-        "funrun"
-      ]
+      "wraps": ["conductor", "funhost", "funrun"]
     },
     {
       "kind": "region",
       "label": "Stateless worker pools",
-      "wraps": [
-        "isoworker",
-        "nodeworker"
-      ]
+      "wraps": ["isoworker", "nodeworker"]
     }
   ],
   "connections": [

@@ -3,42 +3,26 @@
   "diagram_type": "sequence",
   "meta": {
     "title": "Node worker: one \"use node\" action",
-    "viewBox": [
-      980,
-      562
-    ],
+    "viewBox": [980, 562],
     "column_fit": "spread",
     "quality_profile": "showcase",
     "views": [
       {
         "id": "dispatch",
         "label": "Dispatch",
-        "focus": [
-          "client",
-          "conductor",
-          "nodeworker"
-        ],
+        "focus": ["client", "conductor", "nodeworker"],
         "note": "Only reached when FUNRUN_NODE_WORKERS names a pool; otherwise the action stays on the conductor."
       },
       {
         "id": "origins",
         "label": "Two callback origins",
-        "focus": [
-          "nodeproc",
-          "conductor",
-          "s3"
-        ],
+        "focus": ["nodeproc", "conductor", "s3"],
         "note": "Syscalls use the callback origin; ctx.storage fetches URLs built from the cloud origin."
       },
       {
         "id": "return",
         "label": "Return",
-        "focus": [
-          "nodeproc",
-          "nodeworker",
-          "conductor",
-          "client"
-        ],
+        "focus": ["nodeproc", "nodeworker", "conductor", "client"],
         "note": "The worker hands back a result JSON; the conductor owns the transaction."
       }
     ]

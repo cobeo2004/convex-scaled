@@ -3,42 +3,26 @@
   "diagram_type": "sequence",
   "meta": {
     "title": "Isolate worker: one request",
-    "viewBox": [
-      1040,
-      625
-    ],
+    "viewBox": [1040, 625],
     "column_fit": "spread",
     "quality_profile": "showcase",
     "views": [
       {
         "id": "dispatch",
         "label": "Dispatch",
-        "focus": [
-          "client",
-          "conductor",
-          "worker"
-        ],
+        "focus": ["client", "conductor", "worker"],
         "note": "The conductor picks a worker and opens one Execute stream per attempt."
       },
       {
         "id": "syscalls",
         "label": "Reads travel back",
-        "focus": [
-          "isolate",
-          "funhost",
-          "pg"
-        ],
+        "focus": ["isolate", "funhost", "pg"],
         "note": "The worker has no database, so every read returns to the conductor mid-execution."
       },
       {
         "id": "commit",
         "label": "Commit and return",
-        "focus": [
-          "worker",
-          "conductor",
-          "pg",
-          "client"
-        ],
+        "focus": ["worker", "conductor", "pg", "client"],
         "note": "Only the conductor writes; the worker returns an outcome, not a committed transaction."
       }
     ]
