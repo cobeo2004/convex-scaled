@@ -232,3 +232,32 @@ healthy `node` pool and 403s without an admin key, and exercises the `node`
 fallback path (stop `node-worker`, restart the conductor with
 `FUNRUN_FALLBACK=local`, rerun the Node test, and check
 `funrun_fallback_total{kind="node"}` on `:9101/metrics`).
+
+## Load balancing
+
+`e2e/balance.sh` brings the stack up in remote-direct mode with two isolate
+workers and two node workers, deploys `e2e/convex/`, and runs
+`e2e/tests/balance.test.ts`, which checks that one module keeps to one isolate
+worker, that ten distinct modules reach both, that a worker saturated past
+`FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM` spills to its neighbour, and that node
+actions spread across both node workers. It tears the stack down (`-v`) on exit.
+
+Attribution comes from each worker's own
+`funrun_worker_grpc_server_started_total{method="Execute"}` on `:9100/metrics`
+-- one `Execute` stream per request the conductor sent it. The conductor exports
+no per-worker request counter, and the `Created <pool> isolate worker` line that
+`run.sh` greps fires once per V8 thread at warm-up, so it can say a worker ran
+something but not what.
+
+To run the tests against a stack that is already up, scale its node pool to two
+and point `COMPOSE_CMD` at it instead of letting `balance.sh` own the lifecycle:
+
+```sh
+docker compose --profile node up -d --no-recreate --scale node-worker=2 node-worker
+cd e2e && COMPOSE_CMD="docker compose -f ../docker-compose.yml" \
+  ./node_modules/.bin/vitest run tests/balance.test.ts
+```
+
+Note that `balance.sh`, `run.sh` and `failures.sh` all drive the same
+`convex-funrun` Compose project, so running one of them destroys the volumes of
+a stack you already had up.
