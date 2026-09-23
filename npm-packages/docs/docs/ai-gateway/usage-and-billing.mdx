@@ -27,12 +27,30 @@ pick the **AI** tab. It lists spend per function.
 See the [usage page docs](/dashboard/teams/teams.mdx#usage) for the rest of the
 page.
 
+## Usage limits
+
+Set daily or monthly AI Gateway limits for a cloud deployment from **Settings →
+Usage Limits**. Choose the **AI Gateway** metric and set a disable threshold in
+dollars. Production and preview deployments also support warning thresholds.
+Reaching the disable threshold disables the whole deployment, not just AI
+Gateway requests.
+
+<Screenshot
+  story="docs/pages/project/deployment/settings/UsageLimits"
+  alt="Deployment usage limits, including AI Gateway spending thresholds"
+/>
+
+See [Usage limits](/production/usage-limits.mdx) for thresholds and reset
+windows.
+
 ## How billing works
 
 We charge the same rates as [OpenRouter](https://openrouter.ai/models). Price
 per token depends on the model, when you use it, and whether the tokens are
-cached. The charge appears as an AI Gateway line item on your Convex invoice, in
-dollars.
+cached. Image and video prices depend on the model and generation options, such
+as resolution and duration. Cancelling a video request after submission can
+still incur its generation cost. The charge appears as an AI Gateway line item
+on your Convex invoice, in dollars.
 
 [Spending limits](/dashboard/teams/teams.mdx#spending-limits) apply to AI
 Gateway spend like any other usage. Set a limit on the team billing page to cap

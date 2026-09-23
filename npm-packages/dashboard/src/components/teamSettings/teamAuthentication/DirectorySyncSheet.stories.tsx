@@ -1,16 +1,26 @@
+import { useSyncExternalStore } from "react";
 import { Meta, StoryObj } from "@storybook/nextjs";
-import { fn, mocked, screen, userEvent } from "storybook/test";
+import { expect, fn, mocked, screen, userEvent } from "storybook/test";
 import {
+  useDirectorySyncGroups,
   useDisableDirectorySync,
+  useEnableDirectorySync,
   useGenerateDirectorySyncConfigurationLink,
   useGetDirectorySync,
+  useSetGroupRoleMapping,
+  useStagedDirectoryMembers,
 } from "api/directorySync";
 import {
   useHasCustomRolePermission,
   useIsCurrentMemberTeamAdmin,
+  useListCustomRoles,
 } from "api/roles";
 import { useGetSSO, useTeamEntitlements } from "api/teams";
-import type { TeamResponse } from "generatedApi";
+import type {
+  DirectoryGroupResponse,
+  DirectoryResponse,
+  TeamResponse,
+} from "generatedApi";
 import { DirectorySyncSheet } from "./DirectorySyncSheet";
 
 const team: TeamResponse = {
@@ -21,6 +31,47 @@ const team: TeamResponse = {
   suspended: false,
   referralCode: "ACME01",
 };
+
+const groups: DirectoryGroupResponse[] = [
+  {
+    workosGroupId: "group_admins",
+    name: "convex-team-admins",
+    idpId: "idp_admins",
+    mapping: { role: "admin" },
+  },
+  {
+    workosGroupId: "group_eng",
+    name: "Engineering",
+    idpId: "idp_eng",
+    mapping: null,
+  },
+  {
+    workosGroupId: "group_leads",
+    name: "Engineering Leads",
+    idpId: "idp_leads",
+    mapping: { role: "admin" },
+  },
+  {
+    workosGroupId: "group_support",
+    name: "Support",
+    idpId: "idp_support",
+    mapping: {
+      role: "custom",
+      customRoles: [{ id: 7, name: "Support Engineer" }],
+    },
+  },
+];
+
+function mockGroups(data: DirectoryGroupResponse[], hasMore = false) {
+  mocked(useDirectorySyncGroups).mockReturnValue({
+    data: {
+      groups: data,
+      pagination: { hasMore, nextCursor: hasMore ? "next" : null },
+    },
+    isLoading: false,
+    error: undefined,
+  });
+}
 
 const meta = {
   component: DirectorySyncSheet,
@@ -38,7 +89,30 @@ const meta = {
     mocked(useTeamEntitlements).mockReturnValue({
       ssoEnabled: true,
       directorySyncEnabled: true,
+      customRolesEnabled: true,
     } as ReturnType<typeof useTeamEntitlements>);
+    mocked(useListCustomRoles).mockReturnValue({
+      data: {
+        items: [
+          {
+            id: 7,
+            teamId: 1,
+            name: "Support Engineer",
+            statements: [],
+            createTime: 0,
+          },
+        ],
+        pagination: { hasMore: false, nextCursor: null },
+      },
+    } as unknown as ReturnType<typeof useListCustomRoles>);
+    mocked(useSetGroupRoleMapping).mockReturnValue(fn() as any);
+    mocked(useEnableDirectorySync).mockReturnValue(fn() as any);
+    mocked(useStagedDirectoryMembers).mockReturnValue({
+      data: { items: [], pagination: { hasMore: false, nextCursor: null } },
+      isLoading: false,
+      error: undefined,
+    });
+    mockGroups(groups);
     mocked(useGetSSO).mockReturnValue({
       data: {
         createTime: Date.now(),
@@ -47,14 +121,16 @@ const meta = {
         domains: [{ id: "dom_1", domain: "acme.com", state: "verified" }],
       },
       isLoading: false,
+      error: undefined,
     });
     mocked(useGenerateDirectorySyncConfigurationLink).mockReturnValue(
       fn(async () => ({ link: "https://portal.workos.com/example" })) as any,
     );
     mocked(useDisableDirectorySync).mockReturnValue(fn() as any);
     mocked(useGetDirectorySync).mockReturnValue({
-      data: { directory: null, enabled: false },
+      data: { directory: null, enabled: false, mirrored: false },
       isLoading: false,
+      error: undefined,
     });
   },
 } satisfies Meta<typeof DirectorySyncSheet>;
@@ -64,20 +140,72 @@ type Story = StoryObj<typeof meta>;
 
 export const NotConfigured: Story = {};
 
+const linkedDirectory = {
+  id: "directory_1",
+  name: "Acme Okta Directory",
+  type: "okta scim v2.0",
+  state: "linked",
+  linked: true,
+};
+
+function mockConfigured() {
+  mocked(useGetDirectorySync).mockReturnValue({
+    data: { directory: linkedDirectory, enabled: false, mirrored: true },
+    isLoading: false,
+    error: undefined,
+  });
+}
+
 export const Configured: Story = {
+  beforeEach: mockConfigured,
+};
+
+// The window right after linking, before WorkOS hands over the roster: no
+// groups to map and no members to review yet.
+export const AwaitingInitialSync: Story = {
+  beforeEach: () => {
+    mocked(useGetDirectorySync).mockReturnValue({
+      data: { directory: linkedDirectory, enabled: false, mirrored: false },
+      isLoading: false,
+      error: undefined,
+    });
+    mockGroups([]);
+  },
+};
+
+export const ManagementEnabled: Story = {
+  beforeEach: () => {
+    mocked(useGetDirectorySync).mockReturnValue({
+      data: { directory: linkedDirectory, enabled: true, mirrored: true },
+      isLoading: false,
+      error: undefined,
+    });
+  },
+};
+
+// The roster only reaches the menu once the directory provisions, so the
+// story opens the menu to show it there.
+export const ManagementEnabledMenu: Story = {
+  ...ManagementEnabled,
+  play: async () => {
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Okta options" }),
+    );
+  },
+};
+
+// An unlinked directory has no groups to map and no roster to review, so the
+// sheet asks for the connection and nothing else.
+export const Unlinked: Story = {
   beforeEach: () => {
     mocked(useGetDirectorySync).mockReturnValue({
       data: {
-        directory: {
-          id: "directory_1",
-          name: "Acme Okta Directory",
-          type: "okta scim v2.0",
-          state: "linked",
-          linked: true,
-        },
+        directory: { ...linkedDirectory, state: "unlinked", linked: false },
         enabled: false,
+        mirrored: false,
       },
       isLoading: false,
+      error: undefined,
     });
   },
 };
@@ -86,7 +214,47 @@ export const ConfiguredMenu: Story = {
   ...Configured,
   play: async () => {
     await userEvent.click(
-      await screen.findByRole("button", { name: "okta scim v2.0 options" }),
+      await screen.findByRole("button", { name: "Okta options" }),
+    );
+  },
+};
+
+export const ConfiguredWithManyGroups: Story = {
+  beforeEach: () => {
+    mockConfigured();
+    mockGroups(groups, true);
+  },
+};
+
+export const ConfiguredAwaitingSync: Story = {
+  beforeEach: () => {
+    mockConfigured();
+    mockGroups([]);
+  },
+};
+
+export const EditGroupRole: Story = {
+  ...Configured,
+  play: async () => {
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit Engineering role" }),
+    );
+  },
+};
+
+// A member who may manage the directory but not read the team's custom
+// roles: the dialog says so where the selector would be.
+export const EditGroupRoleWithoutCustomRolePermission: Story = {
+  beforeEach: () => {
+    mockConfigured();
+    mocked(useIsCurrentMemberTeamAdmin).mockReturnValue(false);
+    mocked(useHasCustomRolePermission).mockImplementation(
+      (_teamId, action) => action !== "customRole:view",
+    );
+  },
+  play: async () => {
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit Support role" }),
     );
   },
 };
@@ -104,5 +272,125 @@ export const NoPermission: Story = {
   beforeEach: () => {
     mocked(useIsCurrentMemberTeamAdmin).mockReturnValue(false);
     mocked(useHasCustomRolePermission).mockReturnValue(false);
+  },
+};
+
+export const LoadFailed: Story = {
+  beforeEach: () => {
+    mocked(useGetDirectorySync).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: new Error("network"),
+    } as unknown as ReturnType<typeof useGetDirectorySync>);
+  },
+};
+
+// The directory as a member works through the portal: absent until their
+// identity provider creates it, then unlinked, validating, and finally linked.
+const CONNECTION_STEPS: (DirectoryResponse | null)[] = [
+  null,
+  { ...linkedDirectory, state: "unlinked", linked: false },
+  linkedDirectory,
+];
+const STEP_INTERVAL_MS = 900;
+
+let currentStep = 0;
+let stepTimer: ReturnType<typeof setInterval> | undefined;
+const stepListeners = new Set<() => void>();
+
+function clearStepTimer() {
+  if (stepTimer !== undefined) {
+    clearInterval(stepTimer);
+    stepTimer = undefined;
+  }
+}
+
+function startStepping() {
+  currentStep = 0;
+  clearStepTimer();
+  stepTimer = setInterval(() => {
+    currentStep += 1;
+    if (currentStep === CONNECTION_STEPS.length - 1) {
+      clearStepTimer();
+    }
+    stepListeners.forEach((listener) => listener());
+  }, STEP_INTERVAL_MS);
+}
+
+function resetStepping() {
+  clearStepTimer();
+  currentStep = 0;
+}
+
+// The sheet and the dialog each call the hook, so they read one step rather
+// than each running a timer of their own and drifting apart.
+function useSteppedDirectorySync(): ReturnType<typeof useGetDirectorySync> {
+  const step = useSyncExternalStore(
+    (listener) => {
+      stepListeners.add(listener);
+      return () => {
+        stepListeners.delete(listener);
+      };
+    },
+    () => currentStep,
+    () => 0,
+  );
+  const directory = CONNECTION_STEPS[step];
+  return {
+    // The walkthrough ends on the review row, so the mirror lands with the
+    // link rather than trailing it; AwaitingInitialSync covers that gap.
+    data: { directory, enabled: false, mirrored: directory?.linked ?? false },
+    isLoading: false,
+    error: undefined,
+  };
+}
+
+// The whole first-run flow: Configure explains what connecting an identity
+// provider does, hands the member off to the portal, and then reports the
+// directory's state until it links. Continue leaves the member on the row that
+// asks them to review the role changes before enabling directory sync.
+export const ConfigureFlow: Story = {
+  beforeEach: () => {
+    resetStepping();
+    // The portal would otherwise open a real tab.
+    const realOpen = window.open;
+    // The dialog opens the tab on the click and navigates it once the link
+    // arrives, so the stub has to look enough like a window for that.
+    window.open = fn(() => ({
+      location: { href: "" },
+      close: fn(),
+    })) as unknown as typeof window.open;
+    mocked(useGenerateDirectorySyncConfigurationLink).mockReturnValue(
+      fn(async () => {
+        // The dialog polls from the hand-off, so that is when the directory
+        // starts making its way to `linked`.
+        startStepping();
+        return { link: "https://portal.workos.com/example" };
+      }) as any,
+    );
+    mocked(useGetDirectorySync).mockImplementation(useSteppedDirectorySync);
+    return () => {
+      resetStepping();
+      window.open = realOpen;
+    };
+  },
+  play: async () => {
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Configure" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Configure Identity Provider",
+      }),
+    );
+    // Buttons fade in, so a just-mounted Continue still computes to opacity 0.
+    // Finding it at all is what says the directory reached `linked`.
+    await expect(
+      await screen.findByRole(
+        "button",
+        { name: "Continue" },
+        { timeout: STEP_INTERVAL_MS * CONNECTION_STEPS.length * 3 },
+      ),
+    ).toBeInTheDocument();
   },
 };

@@ -364,6 +364,7 @@ const deploymentInfo: Omit<DeploymentInfo, "deploymentUrl" | "adminKey"> = {
   managedAnalyticsIntegrationEnabled: false,
   s3ExportIntegrationEnabled: false,
   connectionStateCheckIntervalMs: 2500,
+  showFivetranSyncProgress: false,
 };
 
 function DeploymentInfoProvider({

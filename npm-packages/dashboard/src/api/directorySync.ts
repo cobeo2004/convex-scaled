@@ -1,21 +1,38 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import type { DirectorySyncResponse } from "generatedApi";
 import { useLaunchDarkly } from "hooks/useLaunchDarkly";
 import { useBBMutation, useBBQuery, useMutate } from "./api";
 
 const OFFERS_PATH = "/member/directory_sync_offers";
 const DIRECTORY_SYNC_PATH = "/teams/{team_id}/directory_sync";
+const GROUPS_PATH = "/teams/{team_id}/directory_sync/groups";
+const MAPPING_PATH =
+  "/teams/{team_id}/directory_sync/mappings/{workos_group_id}";
+
+export const DIRECTORY_GROUPS_PAGE_SIZE = 25;
+const STAGED_MEMBERS_PATH = "/teams/{team_id}/directory_sync/staged_members";
+export const STAGED_MEMBERS_PAGE_SIZE = 50;
 
 export function useGetDirectorySync(
   teamId: number | undefined,
-  { isPaused = false }: { isPaused?: boolean } = {},
+  {
+    isPaused = false,
+    refreshInterval,
+  }: {
+    isPaused?: boolean;
+    refreshInterval?:
+      | number
+      | ((latest: DirectorySyncResponse | undefined) => number);
+  } = {},
 ) {
-  const { data, isLoading } = useBBQuery({
+  const { data, isLoading, error } = useBBQuery({
     path: DIRECTORY_SYNC_PATH,
     pathParams: {
       team_id: isPaused ? "" : (teamId?.toString() ?? ""),
     },
+    swrOptions: { refreshInterval },
   });
-  return { data, isLoading };
+  return { data, isLoading, error };
 }
 
 export function useGenerateDirectorySyncConfigurationLink(teamId: number) {
@@ -28,7 +45,7 @@ export function useGenerateDirectorySyncConfigurationLink(teamId: number) {
 }
 
 export function useDisableDirectorySync(teamId: number) {
-  return useBBMutation({
+  const disable = useBBMutation({
     path: "/teams/{team_id}/directory_sync/disable",
     pathParams: {
       team_id: teamId.toString(),
@@ -38,6 +55,96 @@ export function useDisableDirectorySync(teamId: number) {
       team_id: teamId.toString(),
     },
     successToast: "Directory Sync has been disabled for your team.",
+  });
+  const mutate = useMutate();
+  return useCallback(async () => {
+    const result = await disable();
+    await mutate([GROUPS_PATH]);
+    await mutate([STAGED_MEMBERS_PATH]);
+    return result;
+  }, [disable, mutate]);
+}
+
+export function useEnableDirectorySync(teamId: number) {
+  const enable = useBBMutation({
+    path: "/teams/{team_id}/directory_sync/enable",
+    pathParams: {
+      team_id: teamId.toString(),
+    },
+    mutateKey: DIRECTORY_SYNC_PATH,
+    mutatePathParams: {
+      team_id: teamId.toString(),
+    },
+    successToast: "Directory Sync has been enabled for your team.",
+  });
+  const mutate = useMutate();
+  return useCallback(async () => {
+    const result = await enable();
+    // Once management is on the roster only lists who can still join, so
+    // the staged list has to be refetched too.
+    await mutate([STAGED_MEMBERS_PATH]);
+    return result;
+  }, [enable, mutate]);
+}
+
+export function useStagedDirectoryMembers(
+  teamId: number | undefined,
+  cursor: string | undefined,
+  { isPaused = false }: { isPaused?: boolean } = {},
+) {
+  const queryParams = useMemo(
+    () => ({ cursor, limit: STAGED_MEMBERS_PAGE_SIZE }),
+    [cursor],
+  );
+  const { data, isLoading, error } = useBBQuery({
+    path: STAGED_MEMBERS_PATH,
+    pathParams: {
+      team_id: isPaused ? "" : (teamId?.toString() ?? ""),
+    },
+    queryParams,
+  });
+  // The spec declares no error body for this route, so SWR types the error
+  // as `never`; the roster still 404s while the directory is unconfigured.
+  // Network failures arrive as an `Error`, which carries no `code`.
+  return {
+    data,
+    isLoading,
+    error: error as { code?: string; message?: string } | undefined,
+  };
+}
+
+export function useDirectorySyncGroups(
+  teamId: number | undefined,
+  cursor: string | undefined,
+  { isPaused = false }: { isPaused?: boolean } = {},
+) {
+  const queryParams = useMemo(
+    () => ({ cursor, limit: DIRECTORY_GROUPS_PAGE_SIZE }),
+    [cursor],
+  );
+  const { data, isLoading, error } = useBBQuery({
+    path: GROUPS_PATH,
+    pathParams: {
+      team_id: isPaused ? "" : (teamId?.toString() ?? ""),
+    },
+    queryParams,
+  });
+  return { data, isLoading, error };
+}
+
+export function useSetGroupRoleMapping(teamId: number, workosGroupId: string) {
+  return useBBMutation({
+    method: "put",
+    path: MAPPING_PATH,
+    pathParams: {
+      team_id: teamId,
+      workos_group_id: workosGroupId,
+    },
+    mutateKey: GROUPS_PATH,
+    mutatePathParams: {
+      team_id: teamId.toString(),
+    },
+    successToast: "Group role updated.",
   });
 }
 

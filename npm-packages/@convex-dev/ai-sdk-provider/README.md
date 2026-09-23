@@ -49,14 +49,19 @@ convexGateway.responses("openai/gpt-5");
 
 ## Structured decisions
 
+Use provider version 0.2.1 or later for correct validation of Jev's rounded
+scores and probabilities.
+
 [Jev](https://docs.typesafe.ai/introduction) evaluates `choice`, `score`, and
-`noul` questions about the context you provide in `state`. It returns structured
-answers your code can use directly. Call `convexGateway.decisions()` from an
-action:
+`boolean` questions about the context you provide in `state`. Call AI SDK's
+experimental `evaluate` from an action:
 
 ```ts
-const decision = await convexGateway.decisions({
-  model: "typesafe/jev-1.13",
+import { experimental_evaluate as evaluate } from "ai";
+import { convexGateway } from "@convex-dev/ai-sdk-provider";
+
+const decision = await evaluate({
+  model: convexGateway.evaluationModel("typesafe/jev-1.13"),
   state: { ticket: "Customer cannot sign in" },
   questions: {
     priority: {
@@ -68,28 +73,32 @@ const decision = await convexGateway.decisions({
       },
     },
     needsReview: {
-      type: "noul",
+      type: "boolean",
       instructions: "Does a human need to review this?",
     },
   },
 });
 
 console.log(decision.answers.priority.choice);
-console.log(decision.answers.needsReview.noul);
+console.log(decision.answers.needsReview.probability);
 ```
 
-The method returns answers rather than a model for `generateText`.
-Authentication is handled automatically. Pass `{ signal }` as the second
-argument to cancel a request with an `AbortSignal`. HTTP errors and invalid
-responses throw `ConvexGatewayError`.
+This requires AI SDK 7.0.105 or later. The evaluation interface and
+`/alpha/decisions` endpoint are experimental. Authentication is handled
+automatically. Pass `abortSignal` to `evaluate` to cancel a request. Dollar cost
+is available in `decision.providerMetadata?.convexGateway?.cost`. The original
+gateway response, including provider-specific fields such as `confidence`, is
+available in `decision.response.body`.
 
 `getServiceToken("ai-gateway")` supplies a short-lived deployment JWT. The
 action runtime caches and refreshes the credential as needed, so
 `convexGateway(...)` is recommended to call it repeatedly.
 
-Requires Convex 1.45 or later, AI SDK 7, and Node.js 22 or later.
+Requires Convex 1.45 or later, AI SDK 7.0.105 or later, and Node.js 22 or later.
 
 ## Generate images
+
+Image generation is in alpha. The request and response format may change.
 
 ```ts
 import { generateImage } from "ai";
@@ -102,6 +111,9 @@ const { images } = await generateImage({
 ```
 
 ## Generate videos
+
+Video generation is in alpha. APIs may change, and completion callbacks are best
+effort. Save async operation handles to check status and retrieve results.
 
 ```ts
 import { experimental_generateVideo as generateVideo } from "ai";
@@ -132,3 +144,93 @@ for audio. `fps` returns an unsupported-option warning.
 `generate_audio`, `frame_images`, and `input_references`. Standard SDK options
 take precedence. Supported values depend on the
 [OpenRouter model](https://openrouter.ai/docs/guides/overview/multimodal/video-generation).
+
+## Async videos
+
+With AI SDK 7.0.83, use `experimental_startVideo` to submit a job without
+waiting for the video. See the
+[async availability requirements](https://docs.convex.dev/ai-gateway/images-and-videos#async-videos)
+before using these routes.
+
+Create an application job first. Use its ID as `requestId` in the callback URL
+so the receiver can find the job and its saved secret.
+
+```ts
+import { experimental_startVideo as startVideo } from "ai";
+import { convexGateway } from "@convex-dev/ai-sdk-provider";
+
+async function startJob(requestId: string) {
+  const modelId = "google/veo-3.1";
+  const started = await startVideo({
+    model: convexGateway.videoModel(modelId),
+    prompt: "A camera pan across a mountain lake",
+    duration: 8,
+    webhookUrl: `${process.env.CONVEX_SITE_URL}/video-complete?requestId=${requestId}`,
+    maxRetries: 0,
+  });
+
+  return {
+    modelId,
+    operation: started.operation,
+    inferenceId: started.providerMetadata?.convexGateway?.inferenceId,
+    webhookSecret: started.providerMetadata?.convexGateway?.webhookSecret,
+  };
+}
+```
+
+Save the returned job in private application storage before the action returns.
+Automatic submission retries are disabled because a lost response can still mean
+a paid job was accepted. Callback URLs must use the deployment's own HTTPS
+`<deployment>.convex.site` origin; redirects are rejected. If `CONVEX_SITE_URL`
+uses a custom domain, use the deployment's default `convex.site` origin in the
+example instead.
+
+### Receive a callback
+
+Load the saved job and verify the raw request body before updating application
+state:
+
+```ts
+import { verifyVideoWebhook } from "@convex-dev/ai-sdk-provider";
+
+const event = await verifyVideoWebhook({
+  body: await request.text(),
+  signature: request.headers.get("x-convex-video-signature"),
+  secret: savedJob.webhookSecret,
+});
+
+if (event.id !== savedJob.inferenceId) {
+  return new Response("Wrong job", { status: 400 });
+}
+```
+
+Deduplicate `(event.id, event.status)` in the same mutation that saves the
+event. For `completed`, schedule an action to download the video. Record
+`failed`, `cancelled`, or `expired` as terminal failures. Return 204 after
+saving the event; return a non-2xx response if the job's secret has not been
+saved yet.
+
+### Retrieve the video
+
+In a later action, use the saved operation to check status and download:
+
+```ts
+const model = convexGateway.videoModel(savedJob.modelId);
+const status = await model.getStatus({ operation: savedJob.operation });
+
+if (status.status === "completed") {
+  const result = await model.download({ operation: savedJob.operation });
+  const video = result.videos[0];
+  const cost = result.providerMetadata?.convexGateway?.cost;
+}
+```
+
+`getStatus` returns `pending`, `completed`, or `error`. When the status is
+`error`, the `error` field contains the error message. Store the downloaded
+video in application storage, since each `download` call fetches it again.
+Operations expire after seven days; upstream video retention may be shorter.
+
+Omit `webhookUrl` to use status checks alone. If a completion callback is
+missed, use the saved operation to check the job and retrieve its result.
+Applications that need automatic recovery can periodically check unfinished
+jobs.

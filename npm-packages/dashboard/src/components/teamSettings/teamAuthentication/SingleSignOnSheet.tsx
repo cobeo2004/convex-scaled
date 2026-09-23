@@ -7,6 +7,7 @@ import {
 import { Button } from "@ui/Button";
 import startCase from "lodash/startCase";
 import { Callout } from "@ui/Callout";
+import { Link } from "@ui/Link";
 import { Checkbox } from "@ui/Checkbox";
 import { ConfirmationDialog } from "@ui/ConfirmationDialog";
 import { Loading } from "@ui/Loading";
@@ -28,13 +29,22 @@ import {
 import { NoPermissionMessage } from "elements/NoPermissionMessage";
 import { permissionDeniedTip } from "elements/permissionDeniedTip";
 import { SSO_RESOURCE } from "lib/permissions";
+import { ProviderIcon } from "./ProviderIcon";
 import {
   ConfigurationRow,
   EmptyStateRow,
+  LoadErrorState,
   SHEET_ROW,
   SettingsSheet,
 } from "./SettingsSheet";
 import { ConnectionStatusBadge } from "./StatusBadge";
+import { connectionProvider, useReportUnmappedProviders } from "./providers";
+
+const SSO_DOCS_LINK = (
+  <Link href="https://docs.convex.dev/team-management/sso" target="_blank">
+    Learn more about SSO
+  </Link>
+);
 
 export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
   const isTeamAdmin = useIsCurrentMemberTeamAdmin();
@@ -71,7 +81,7 @@ export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
 
   const entitlements = useTeamEntitlements(team.id);
   const ssoEntitled = entitlements?.ssoEnabled ?? false;
-  const { data: sso } = useGetSSO(team.id, {
+  const { data: sso, error: ssoError } = useGetSSO(team.id, {
     isPaused: canView !== true,
   });
   const generateSSOConfigurationLink = useGenerateSSOConfigurationLink(team.id);
@@ -90,9 +100,17 @@ export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
   const [isSavingRequireSsoLogin, setIsSavingRequireSsoLogin] = useState(false);
   const [requireSsoLoginError, setRequireSsoLoginError] = useState<string>();
 
-  const connections = sso?.connections ?? [];
+  const connections = (sso?.connections ?? []).map((connection) => ({
+    ...connection,
+    provider: connectionProvider(connection.connectionType),
+  }));
+  useReportUnmappedProviders(connections.map((c) => c.provider));
   const configured = connections.length > 0;
   const isLoadingSso = sso === undefined;
+  // SWR hands back the last good response while it revalidates, so a failed
+  // background refresh leaves the configuration on screen; only a failure with
+  // nothing to fall back on takes the sheet over.
+  const failedToLoad = isLoadingSso && ssoError !== undefined;
   const hasVerifiedDomain = (sso?.domains ?? []).some(
     (d) => d.state === "verified" || d.state === "legacyVerified",
   );
@@ -115,7 +133,12 @@ export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
     return (
       <SettingsSheet
         title="Single sign-on"
-        description="Configure an identity provider for your team members to use as a login method."
+        description={
+          <>
+            Configure an identity provider for your team members to use as a
+            login method. {SSO_DOCS_LINK}.
+          </>
+        }
       >
         <div className="px-6 py-10">
           <NoPermissionMessage
@@ -175,13 +198,24 @@ export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
   return (
     <SettingsSheet
       title="Single sign-on"
+      testId="sso-sheet"
       description={
-        configured
-          ? "Manage your SSO identity provider configuration."
-          : "Configure an identity provider for your team members to use as a login method."
+        configured ? (
+          <>Manage your SSO identity provider configuration. {SSO_DOCS_LINK}.</>
+        ) : (
+          <>
+            Configure an identity provider for your team members to use as a
+            login method. {SSO_DOCS_LINK}.
+          </>
+        )
       }
     >
-      {isLoadingSso ? (
+      {failedToLoad ? (
+        <LoadErrorState
+          title="Error fetching SSO configuration"
+          description="An error occurred while fetching your SSO configuration. Please try again later."
+        />
+      ) : isLoadingSso ? (
         <Loading fullHeight={false} className="m-3 h-10" />
       ) : configured ? (
         <>
@@ -189,7 +223,8 @@ export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
             {connections.map((connection) => (
               <ConfigurationRow
                 key={connection.id}
-                title={connection.connectionType}
+                title={connection.provider.label}
+                icon={<ProviderIcon provider={connection.provider} />}
                 badge={<ConnectionStatusBadge connection={connection} />}
                 menu={
                   <Menu
@@ -198,7 +233,7 @@ export function SingleSignOnSheet({ team }: { team: TeamResponse }) {
                       variant: "neutral",
                       size: "xs",
                       icon: <DotsVerticalIcon />,
-                      "aria-label": `${connection.connectionType} options`,
+                      "aria-label": `${connection.provider.label} options`,
                     }}
                   >
                     <MenuItem

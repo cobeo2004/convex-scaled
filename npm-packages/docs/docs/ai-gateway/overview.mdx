@@ -1,15 +1,15 @@
 ---
 title: "AI Gateway"
-description: "Managed LLM access from Convex actions"
+description: "Managed AI model access from Convex actions"
 sidebar_position: 0
 sidebar_label: Overview
 pagination_next: ai-gateway/setup
 ---
 
-The Convex AI Gateway is a managed service that lets your app talk to LLMs from
-[actions](/functions/actions.mdx). Convex holds the provider credentials, so you
-don't need to obtain, store, or rotate a key. Your action authenticates with a
-short-lived token scoped to your deployment.
+The Convex AI Gateway is a managed service that lets your app call AI models
+from [actions](/functions/actions.mdx). Convex holds the provider credentials,
+so you don't need to obtain, store, or rotate a key. Your action authenticates
+with a short-lived token scoped to your deployment.
 
 ```ts
 const { text } = await generateText({
@@ -22,22 +22,48 @@ See [Getting started](/ai-gateway/setup) for the full setup.
 
 ## Supported endpoints
 
+### Text generation
+
+See [Getting started](/ai-gateway/setup.mdx) for text generation and embedding
+examples.
+
 | Endpoint                    | What it does                                    |
 | --------------------------- | ----------------------------------------------- |
 | `GET /v1/models`            | List available models                           |
 | `POST /v1/chat/completions` | Chat completions, streaming and non-streaming   |
-| `POST /alpha/decisions`     | Classify or score data with Jev                 |
 | `POST /v1/embeddings`       | Generate embeddings                             |
 | `POST /v1/messages`         | Anthropic Messages, streaming and non-streaming |
 | `POST /v1/responses`        | OpenAI Responses, streaming and non-streaming   |
 
-An unsupported path returns `400` with `unsupported_endpoint`.
+### Decisions with Jev
 
-:::caution Decisions is in alpha
+Call `/alpha/decisions` to classify or score data with Jev. See
+[Decisions](/ai-gateway/api.mdx#post-alphadecisions) for the request format.
+
+<Admonition type="caution" title="Decisions is in alpha">
 
 The `/alpha/decisions` request and response format may change during alpha.
 
-:::
+</Admonition>
+
+### Images and videos
+
+| Endpoint                      | What it does                     |
+| ----------------------------- | -------------------------------- |
+| `POST /v1/images/generations` | Generate images                  |
+| `POST /v1/videos/generations` | Wait for a video and download it |
+| `POST /v1/videos`             | Start an async video job         |
+| `POST /v1/videos/status`      | Check an async job               |
+| `POST /v1/videos/download`    | Download a completed async video |
+
+See [Images and videos](/ai-gateway/images-and-videos) for SDK examples and
+async availability requirements.
+
+<Admonition type="caution" title="Image and video generation are in alpha">
+
+The request and response format may change during alpha.
+
+</Admonition>
 
 See [HTTP API](/ai-gateway/api.mdx) for the request and response shapes.
 

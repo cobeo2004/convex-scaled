@@ -59,6 +59,7 @@ use common::{
     },
     shutdown::ShutdownSignal,
     types::{
+        DeploymentId as BigBrainDeploymentId,
         IndexRef,
         PersistenceIndexId,
         PersistenceVersion,
@@ -96,10 +97,11 @@ use super::{
         LogBucket,
         LogBucketBounds,
     },
-    DeploymentId,
+    PersistenceDeploymentId,
 };
 use crate::{
     chunks::{
+        fill_chunks,
         smart_chunks,
         ApproxSize,
     },
@@ -129,7 +131,7 @@ pub(crate) struct Reader<RT: Runtime> {
 struct Inner<RT: Runtime> {
     pool: Arc<ConvexMySqlPool<RT>>,
     db_name: String,
-    deployment_id: DeploymentId,
+    deployment_id: PersistenceDeploymentId,
     fresh: AtomicBool,
     engine: IndexEngine,
 }
@@ -159,7 +161,7 @@ impl<RT: Runtime> Persistence<RT> {
     async fn new_inner(
         pool: Arc<ConvexMySqlPool<RT>>,
         db_name: String,
-        deployment_id: DeploymentId,
+        deployment_id: PersistenceDeploymentId,
         allow_read_only: bool,
         lease_lost_shutdown: ShutdownSignal,
     ) -> Result<Self, ConnectError> {
@@ -326,28 +328,6 @@ impl<RT: Runtime> Persistence<RT> {
             .query_optional(sql::HAS_LATEST_ROW, vec![self.inner.deployment_id.into()])
             .await?
             .is_some())
-    }
-
-    /// READ COMMITTED keeps the `LIMIT` scan from gap-locking the marker
-    /// range against the committer's concurrent marker inserts.
-    pub(crate) async fn delete_index_backfill_markers_chunk(
-        &self,
-        index: PersistenceIndexId,
-    ) -> anyhow::Result<u64> {
-        let chunk_size = u64::try_from(*INDEX_RETENTION_DELETE_CHUNK)?;
-        self.lease
-            .transact_read_committed(async |tx| {
-                tx.exec_iter(
-                    sql::DELETE_BACKFILL_MARKERS_CHUNK,
-                    vec![
-                        self.inner.deployment_id.into(),
-                        index.value().into(),
-                        chunk_size.into(),
-                    ],
-                )
-                .await
-            })
-            .await
     }
 
     fn document_params(&self, update: &DocumentLogEntry) -> anyhow::Result<Vec<Value>> {
@@ -743,7 +723,7 @@ impl<RT: Runtime> common::persistence::Persistence for Persistence<RT> {
         let cluster_name = self.inner.pool.cluster_name();
         self.lease
             .transact(async |tx| {
-                for chunk in smart_chunks(document_updates) {
+                for chunk in fill_chunks(document_updates) {
                     let query = match conflict_strategy {
                         ConflictStrategy::Error => documents::insert_chunk(chunk.len()),
                         ConflictStrategy::Overwrite => {
@@ -757,7 +737,7 @@ impl<RT: Runtime> common::persistence::Persistence for Persistence<RT> {
                     let chunk_bytes: usize = chunk.iter().map(ApproxSize::approx_size).sum();
                     async {
                         let timer = metrics::insert_document_chunk_timer(cluster_name);
-                        tx.exec_drop(&query, params).await?;
+                        tx.query_drop(&query, params).await?;
                         timer.finish();
                         anyhow::Ok(())
                     }
@@ -796,7 +776,7 @@ impl<RT: Runtime> common::persistence::Persistence for Persistence<RT> {
         metrics::log_index_write_bytes(entries.iter().map(ApproxSize::approx_size).sum());
         let rows = self.inner.engine.plan_backfill_rows(entries)?;
         let cluster_name = self.inner.pool.cluster_name();
-        for chunk in smart_chunks(&rows) {
+        for chunk in fill_chunks(&rows) {
             self.lease
                 .transact(async |tx| {
                     self.inner
@@ -869,22 +849,26 @@ impl<RT: Runtime> common::persistence::Persistence for Persistence<RT> {
             .await
     }
 
-    /// Deletes at most `INDEX_RETENTION_DELETE_CHUNK` rows per transaction.
-    /// The caller must ensure no new rows are added for these indexes.
-    async fn delete_index_backfill_markers(
+    /// READ COMMITTED allows concurrent marker inserts for other indexes
+    /// during the `LIMIT` scan by avoiding gap locks.
+    async fn delete_index_backfill_markers_chunk(
         &self,
-        indexes: &[PersistenceIndexId],
-    ) -> anyhow::Result<()> {
+        index: PersistenceIndexId,
+    ) -> anyhow::Result<u64> {
         let chunk_size = u64::try_from(*INDEX_RETENTION_DELETE_CHUNK)?;
-        for index in indexes {
-            loop {
-                let deleted = self.delete_index_backfill_markers_chunk(*index).await?;
-                if deleted < chunk_size {
-                    break;
-                }
-            }
-        }
-        Ok(())
+        self.lease
+            .transact_read_committed(async |tx| {
+                tx.exec_iter(
+                    sql::DELETE_BACKFILL_MARKERS_CHUNK,
+                    vec![
+                        self.inner.deployment_id.into(),
+                        index.value().into(),
+                        chunk_size.into(),
+                    ],
+                )
+                .await
+            })
+            .await
     }
 
     async fn write_persistence_global(
@@ -975,7 +959,7 @@ impl<RT: Runtime> common::persistence::Persistence for Persistence<RT> {
         self.lease
             .transact(async |tx| {
                 let mut deleted = 0;
-                for chunk in smart_chunks(&document_ids) {
+                for chunk in fill_chunks(&document_ids) {
                     let mut params = vec![self.inner.deployment_id.into()];
                     for (ts, id) in chunk {
                         params.extend([
@@ -985,7 +969,7 @@ impl<RT: Runtime> common::persistence::Persistence for Persistence<RT> {
                         ]);
                     }
                     deleted += tx
-                        .exec_iter(&documents::delete_chunk(chunk.len()), params)
+                        .query_iter(&documents::delete_chunk(chunk.len()), params)
                         .await? as usize;
                 }
                 Ok(deleted)
@@ -1289,7 +1273,7 @@ impl<RT: Runtime> PersistenceReader for Reader<RT> {
 pub(crate) struct Lease<RT: Runtime> {
     pool: Arc<ConvexMySqlPool<RT>>,
     db_name: String,
-    deployment_id: DeploymentId,
+    deployment_id: PersistenceDeploymentId,
     lease_ts: i64,
     lease_lost_shutdown: ShutdownSignal,
 }
@@ -1298,7 +1282,7 @@ impl<RT: Runtime> Lease<RT> {
     async fn acquire(
         pool: Arc<ConvexMySqlPool<RT>>,
         db_name: String,
-        deployment_id: DeploymentId,
+        deployment_id: PersistenceDeploymentId,
         lease_lost_shutdown: ShutdownSignal,
     ) -> anyhow::Result<Self> {
         let timer = metrics::lease_acquire_timer(pool.cluster_name());
@@ -1391,15 +1375,13 @@ impl<RT: Runtime> Lease<RT> {
 fn deployment_id_from_options(
     version: PersistenceVersion,
     multitenant: bool,
-    deployment_id: Option<common::types::DeploymentId>,
-) -> anyhow::Result<DeploymentId> {
+    deployment_id: BigBrainDeploymentId,
+) -> anyhow::Result<PersistenceDeploymentId> {
     anyhow::ensure!(
         version == PersistenceVersion::V6 && multitenant,
         "MySQL V6 is only supported by the multitenant V6 driver"
     );
-    deployment_id
-        .context("MySQL V6 requires a deployment ID")?
-        .try_into()
+    deployment_id.try_into()
 }
 
 fn out_of_retention_error(read_timestamp: Timestamp, reason: String) -> anyhow::Error {

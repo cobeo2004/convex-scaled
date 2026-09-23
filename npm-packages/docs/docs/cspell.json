@@ -1,5 +1,7 @@
 {
   "words": [
+    "oxlint",
+    "oxlintrc",
     "agentic",
     "airbyte",
     "Airbyte",
@@ -105,6 +107,7 @@
     "sandboxed",
     "sarahs",
     "Schedulable",
+    "SCIM",
     "SENDGRID",
     "serializability",
     "shadcn",
@@ -159,5 +162,6 @@
     "zoneinfo"
   ],
   "ignoreRegExpList": ["/#[\\w-]+/", "/\\w+.png/"],
+  "ignorePaths": ["ai-gateway/_models-list.mdx"],
   "enableFiletypes": ["mdx", "md"]
 }

@@ -27,7 +27,13 @@ import { useLaunchDarkly } from "hooks/useLaunchDarkly";
 import { NoPermissionMessage } from "elements/NoPermissionMessage";
 import { permissionDeniedTip } from "elements/permissionDeniedTip";
 import { TEAM_RESOURCE } from "lib/permissions";
-import { EmptyStateRow, SettingsSheet } from "./SettingsSheet";
+import {
+  EmptyStateRow,
+  LoadErrorState,
+  SettingsSheet,
+  TABLE_CELL as CELL,
+  TABLE_HEADER_CELL as HEADER_CELL,
+} from "./SettingsSheet";
 import { DomainStatusBadge } from "./StatusBadge";
 
 // A domain serves both products, but directory sync is still behind a flag, so
@@ -77,7 +83,7 @@ export function DomainsSheet({ team }: { team: TeamResponse }) {
   const entitled =
     (entitlements?.ssoEnabled ?? false) ||
     (directorySync && (entitlements?.directorySyncEnabled ?? false));
-  const { data: domains } = useTeamDomains(team.id, {
+  const { data: domains, error: domainsError } = useTeamDomains(team.id, {
     isPaused: canView !== true,
   });
   const profileEmails = useProfileEmails();
@@ -99,6 +105,10 @@ export function DomainsSheet({ team }: { team: TeamResponse }) {
     );
   const generatePortalLink = useDomainPortalLink(team.id);
   const [isGeneratingLink, setIsGeneratingLink] = useState(false);
+  // SWR hands back the last good list while it revalidates, so a failed
+  // background refresh leaves the domains on screen; only a failure with
+  // nothing to fall back on takes the sheet over.
+  const failedToLoad = domains === undefined && domainsError !== undefined;
 
   if (canView === false) {
     return (
@@ -155,6 +165,7 @@ export function DomainsSheet({ team }: { team: TeamResponse }) {
       title="Authentication Domains"
       description={copy.description}
       descriptionTip={copy.descriptionTip}
+      testId="domains-sheet"
       // One warning for the team's domains rather than one per row: a member
       // needs a verified email on any one of them, not on each.
       badge={
@@ -186,50 +197,52 @@ export function DomainsSheet({ team }: { team: TeamResponse }) {
       // its own copy of it instead.
       action={domains && domains.length > 0 ? addDomainButton : undefined}
     >
-      <LoadingTransition
-        loadingProps={{ fullHeight: false, className: "m-3 h-10" }}
-      >
-        {/* The query is paused until the member's roles arrive, and SWR only
-            reports `isLoading` on the mount that starts a request, so absent
-            domains — not `isLoading` — is what says this is still loading. */}
-        {domains &&
-          (domains.length > 0 ? (
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b">
-                  {/* The domain column absorbs the slack, so status sits
-                      against its own column rather than in the middle of the
-                      row. */}
-                  <th className={cn(HEADER_CELL, "w-full")}>Domain</th>
-                  <th className={HEADER_CELL}>Status</th>
-                  <th className={cn(HEADER_CELL, "w-0")}>
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {domains.map((domain) => (
-                  <DomainRow
-                    key={domain.id}
-                    teamId={team.id}
-                    domain={domain}
-                    canDelete={canDelete}
-                  />
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <EmptyStateRow message={copy.empty} action={addDomainButton} />
-          ))}
-      </LoadingTransition>
+      {failedToLoad ? (
+        <LoadErrorState
+          title="Error fetching domains"
+          description="An error occurred while fetching this team's domains. Please try again later."
+        />
+      ) : (
+        <LoadingTransition
+          loadingProps={{ fullHeight: false, className: "m-3 h-10" }}
+        >
+          {/* The query is paused until the member's roles arrive, and SWR only
+              reports `isLoading` on the mount that starts a request, so absent
+              domains — not `isLoading` — is what says this is still loading. */}
+          {domains &&
+            (domains.length > 0 ? (
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="border-b">
+                    {/* The domain column absorbs the slack, so status sits
+                        against its own column rather than in the middle of the
+                        row. */}
+                    <th className={cn(HEADER_CELL, "w-full")}>Domain</th>
+                    <th className={HEADER_CELL}>Status</th>
+                    <th className={cn(HEADER_CELL, "w-0")}>
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {domains.map((domain) => (
+                    <DomainRow
+                      key={domain.id}
+                      teamId={team.id}
+                      domain={domain}
+                      canDelete={canDelete}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <EmptyStateRow message={copy.empty} action={addDomainButton} />
+            ))}
+        </LoadingTransition>
+      )}
     </SettingsSheet>
   );
 }
-
-// The cells reach the sheet's edges, so they carry its inset themselves.
-const CELL = "px-4 py-3 align-middle";
-const HEADER_CELL =
-  "px-4 py-2 text-left text-sm font-normal text-content-secondary";
 
 function DomainRow({
   teamId,

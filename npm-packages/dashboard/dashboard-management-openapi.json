@@ -869,34 +869,6 @@
         }
       }
     },
-    "/instances/{deployment_name}/auth": {
-      "post": {
-        "operationId": "get_deployment_auth_dashboard",
-        "parameters": [
-          {
-            "name": "deployment_name",
-            "in": "path",
-            "description": "",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstanceAuthForDashboardInteractionsResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/local_deployments/{deployment_name}/auth": {
       "get": {
         "operationId": "get_local_deployment_auth_dashboard",
@@ -3520,6 +3492,7 @@
           "updateDeploymentAccessToken",
           "deleteDeploymentAccessToken",
           "viewDeploymentAccessToken",
+          "createPersonalAccessTokenWithSsoAccess",
           "createTeamDomain",
           "deleteTeamDomain",
           "createCustomDomain",
@@ -4570,7 +4543,8 @@
       "DirectorySyncResponse": {
         "type": "object",
         "required": [
-          "enabled"
+          "enabled",
+          "mirrored"
         ],
         "properties": {
           "directory": {
@@ -4586,6 +4560,10 @@
           "enabled": {
             "type": "boolean",
             "description": "Whether the team has turned directory management on. A directory can\nbe connected and mirrored without it; until this is set nothing from\nthe directory reaches team members."
+          },
+          "mirrored": {
+            "type": "boolean",
+            "description": "Whether Convex holds a mirror of the directory yet. WorkOS delivers the\nroster asynchronously after the directory is linked, so a directory can\nreport itself linked while this is still false, and until it flips the\ngroups and staged rosters have nothing to show."
           }
         }
       },
@@ -4955,10 +4933,10 @@
           "role": {
             "$ref": "#/components/schemas/Role"
           },
-          "customRoleIds": {
+          "customRoles": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/CustomRoleId"
+              "$ref": "#/components/schemas/TeamMemberCustomRole"
             }
           }
         }
@@ -5009,54 +4987,6 @@
             "type": "boolean"
           }
         }
-      },
-      "InstanceAuthForDashboardInteractionsResponse": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": [
-              "adminKey",
-              "instanceUrl",
-              "kind"
-            ],
-            "properties": {
-              "adminKey": {
-                "$ref": "#/components/schemas/SerializedAccessToken"
-              },
-              "instanceUrl": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "Cloud"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "adminKey",
-              "instanceUrl",
-              "kind"
-            ],
-            "properties": {
-              "adminKey": {
-                "$ref": "#/components/schemas/AdminKey"
-              },
-              "instanceUrl": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "Local"
-                ]
-              }
-            }
-          }
-        ]
       },
       "InvitationEligibleEmailsResponse": {
         "type": "object",
