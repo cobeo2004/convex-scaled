@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useRouter } from "next/router";
 import { DotsVerticalIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
 import { Button } from "@ui/Button";
 import { ConfirmationDialog } from "@ui/ConfirmationDialog";
@@ -28,7 +29,6 @@ import {
 import { ConnectDirectoryDialog } from "./ConnectDirectoryDialog";
 import { DirectoryGroupsSheet } from "./DirectoryGroupsSheet";
 import { ProviderIcon } from "./ProviderIcon";
-import { ReviewDirectoryChangesModal } from "./ReviewDirectoryChangesModal";
 import {
   ConfigurationRow,
   EmptyStateRow,
@@ -59,6 +59,7 @@ export const INITIAL_SYNC_IN_PROGRESS =
   "Initial sync in progress. It may take up to an hour to finish. Once the sync has finished you will be able to review and enable your configuration here.";
 
 export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
+  const router = useRouter();
   const isTeamAdmin = useIsCurrentMemberTeamAdmin();
   const canView = useHasCustomRolePermission(
     team.id,
@@ -85,7 +86,7 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
     false,
   );
   // The staged roster names each member and the role they hold, so the
-  // endpoint behind the review modal asks for `member:view` as well.
+  // endpoint behind the review subpage asks for `member:view` as well.
   const canViewMembers = useHasCustomRolePermission(
     team.id,
     "member:view",
@@ -125,7 +126,19 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
   const [showDisableConfirmation, setShowDisableConfirmation] = useState(false);
   const [isDisabling, setIsDisabling] = useState(false);
   const [disableError, setDisableError] = useState<string>();
-  const [showReview, setShowReview] = useState(false);
+
+  // The roster is a subpage of team authentication rather than a dialog, so
+  // it is reached by navigating within the page.
+  const goToReview = () => {
+    void router.push(
+      {
+        pathname: "/t/[team]/settings/team-authentication",
+        query: { team: team.slug, review: "1" },
+      },
+      undefined,
+      { shallow: true },
+    );
+  };
 
   if (canView === false) {
     return (
@@ -196,6 +209,11 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
     !isGeneratingLink;
 
   const managementEnabled = directorySync?.enabled ?? false;
+  // Until the roster is enabled the directory provisions nobody, so tearing it
+  // down is a deletion rather than a change to how members are managed.
+  const disableTitle = managementEnabled
+    ? "Disable Directory Sync"
+    : "Delete directory";
 
   const awaitingInitialSync =
     directory?.linked === true && directorySync?.mirrored === false;
@@ -262,7 +280,7 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
                     <MenuItem
                       disabled={rosterTip !== undefined}
                       tip={rosterTip}
-                      action={() => setShowReview(true)}
+                      action={goToReview}
                     >
                       View pending members
                     </MenuItem>
@@ -283,13 +301,15 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
                       canDisable
                         ? undefined
                         : permissionDeniedTip(
-                            "You do not have permission to disable Directory Sync.",
+                            managementEnabled
+                              ? "You do not have permission to disable Directory Sync."
+                              : "You do not have permission to delete this directory.",
                             "directorySync:disable",
                           )
                     }
                     action={() => setShowDisableConfirmation(true)}
                   >
-                    Disable Directory Sync
+                    {disableTitle}
                   </MenuItem>
                 </Menu>
               }
@@ -346,7 +366,7 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
                         size="xs"
                         disabled={reviewTip !== undefined}
                         tip={reviewTip}
-                        onClick={() => setShowReview(true)}
+                        onClick={goToReview}
                       >
                         Review
                       </Button>
@@ -355,13 +375,6 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
                 )}
               </div>
             ) : null}
-            {showReview && (
-              <ReviewDirectoryChangesModal
-                team={team}
-                enabled={managementEnabled}
-                onClose={() => setShowReview(false)}
-              />
-            )}
           </>
         ) : (
           <EmptyStateRow
@@ -409,12 +422,31 @@ export function DirectorySyncSheet({ team }: { team: TeamResponse }) {
                 setIsDisabling(false);
               }
             }}
-            confirmText="Disable"
+            confirmText={managementEnabled ? "Disable" : "Delete"}
             variant="danger"
-            dialogTitle="Disable Directory Sync"
-            dialogBody="This disconnects your directory, and team members will no longer be provisioned or deprovisioned by your identity provider. Members already on the team keep their access."
+            dialogTitle={disableTitle}
+            dialogBody={
+              <div className="flex flex-col gap-3 text-sm">
+                <p>
+                  {managementEnabled
+                    ? "This disconnects your directory, and team members will no longer be provisioned or deprovisioned by your identity provider. Members already on the team keep their access."
+                    : "This disconnects your directory from your identity provider. Directory Sync never started provisioning, so your team members are unaffected."}
+                </p>
+                {/* True of both wordings: the teardown deletes the directory
+                    itself, and the groups and mappings keyed off it go with
+                    it. */}
+                <p>
+                  Your directory's groups and their role mappings are discarded
+                  along with it. Setting Directory Sync up again means
+                  connecting the directory and mapping every group to a role
+                  from scratch.
+                </p>
+              </div>
+            }
             error={disableError}
-            validationText="DISABLE DIRECTORY SYNC"
+            validationText={
+              managementEnabled ? "DISABLE DIRECTORY SYNC" : "DELETE DIRECTORY"
+            }
           />
         )}
       </SettingsSheet>

@@ -1,6 +1,3 @@
-import { useState } from "react";
-import { Pencil1Icon } from "@radix-ui/react-icons";
-import { Button } from "@ui/Button";
 import { HelpTooltip } from "@ui/HelpTooltip";
 import { LoadingTransition } from "@ui/Loading";
 import { Sheet } from "@ui/Sheet";
@@ -17,7 +14,7 @@ import {
   useSnapBackOnEmptyPage,
 } from "hooks/useCursorPagination";
 import { RoleDisplay } from "../RoleDisplay";
-import { EditGroupRoleDialog } from "./EditGroupRoleDialog";
+import { EditGroupRolePopover } from "./EditGroupRolePopover";
 import { EmptyStateRow, TABLE_CELL, TABLE_HEADER_CELL } from "./SettingsSheet";
 
 const RESERVED_ADMIN_GROUP_NAME = "convex-team-admins";
@@ -39,8 +36,13 @@ export const MULTI_GROUP_EXPLANATION = (
         roles granted.
       </li>
       <li>
-        Otherwise, <span className="font-semibold">Developer</span>, if all of
-        their groups map to Developer or they are in no group.
+        Otherwise, <span className="font-semibold">Developer</span>, if any of
+        their groups maps to Developer.
+      </li>
+      <li>
+        Otherwise <span className="font-semibold">no access</span>: a user no
+        mapped group covers is not offered the team, and a member the directory
+        reaches this way is removed from it.
       </li>
     </ul>
   </div>
@@ -157,33 +159,32 @@ function GroupRow({
   canEdit: boolean;
   customRolesEnabled: boolean;
 }) {
-  const [showEdit, setShowEdit] = useState(false);
-
   const isReserved = group.name.toLowerCase() === RESERVED_ADMIN_GROUP_NAME;
-  // An unmapped group confers Developer, so that is simply what it shows.
-  const role = group.mapping?.role ?? "developer";
-  // The mapping carries its custom roles' names, so the cell reads like the
-  // members table without waiting on the team's role list.
-  const mappedCustomRoles = group.mapping?.customRoles ?? [];
 
   return (
     <tr className="border-b last:border-b-0">
       <td className={cn(TABLE_CELL, "truncate")}>{group.name}</td>
       <td className={TABLE_CELL}>
-        <RoleDisplay
-          role={role}
-          customRoles={mappedCustomRoles}
-          teamSlug={team.slug}
-        />
+        {group.mapping ? (
+          // The mapping carries its custom roles' names, so the cell reads
+          // like the members table without waiting on the team's role list.
+          <RoleDisplay
+            role={group.mapping.role}
+            customRoles={group.mapping.customRoles}
+            teamSlug={team.slug}
+          />
+        ) : (
+          // An unmapped group gives its members no place on the team.
+          <div className="text-sm text-content-secondary">No access</div>
+        )}
       </td>
       <td className={cn(TABLE_CELL, "text-right")}>
-        <Button
-          variant="neutral"
-          size="xs"
-          icon={<Pencil1Icon />}
-          aria-label={`Edit ${group.name} role`}
+        <EditGroupRolePopover
+          team={team}
+          group={group}
+          customRolesEnabled={customRolesEnabled}
           disabled={isReserved || !canEdit}
-          tip={
+          disabledTip={
             isReserved
               ? "Members of convex-team-admins are always team admins. This mapping cannot be changed."
               : canEdit
@@ -193,16 +194,7 @@ function GroupRow({
                     "directorySync:updateGroupMapping",
                   )
           }
-          onClick={() => setShowEdit(true)}
         />
-        {showEdit && (
-          <EditGroupRoleDialog
-            team={team}
-            group={group}
-            customRolesEnabled={customRolesEnabled}
-            onClose={() => setShowEdit(false)}
-          />
-        )}
       </td>
     </tr>
   );

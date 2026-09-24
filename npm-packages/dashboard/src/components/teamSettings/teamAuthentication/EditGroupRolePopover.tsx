@@ -1,19 +1,25 @@
 import { useState } from "react";
+import { Pencil1Icon } from "@radix-ui/react-icons";
 import { Button } from "@ui/Button";
 import { Combobox } from "@ui/Combobox";
 import { Link } from "@ui/Link";
 import { Loading } from "@ui/Loading";
-import { Modal } from "@ui/Modal";
+import { Popover } from "@ui/Popover";
+import { PortalContainer } from "@ui/PortalContainer";
 import { Sheet } from "@ui/Sheet";
 import { Tooltip } from "@ui/Tooltip";
 import type { DirectoryGroupResponse, TeamResponse } from "generatedApi";
-import { useSetGroupRoleMapping } from "api/directorySync";
+import {
+  useDeleteGroupRoleMapping,
+  useSetGroupRoleMapping,
+} from "api/directorySync";
 import { useHasCustomRolePermission, useListCustomRoles } from "api/roles";
 import { NoPermissionMessage } from "elements/NoPermissionMessage";
 import { CUSTOM_ROLE_RESOURCE } from "lib/permissions";
 import { CustomRolesSelector } from "../CustomRolesSelector";
 
-type RoleChoice = "admin" | "developer" | "custom";
+/** `noAccess` is a group with no mapping: it gives its members no place on the team. */
+type RoleChoice = "admin" | "developer" | "custom" | "noAccess";
 
 function sameIds(a: number[], b: number[]) {
   if (a.length !== b.length) return false;
@@ -22,7 +28,73 @@ function sameIds(a: number[], b: number[]) {
   return aSorted.every((v, i) => v === bSorted[i]);
 }
 
-export function EditGroupRoleDialog({
+export function EditGroupRolePopover({
+  team,
+  group,
+  customRolesEnabled,
+  disabled,
+  disabledTip,
+}: {
+  team: TeamResponse;
+  group: DirectoryGroupResponse;
+  customRolesEnabled: boolean;
+  disabled: boolean;
+  disabledTip?: React.ReactNode;
+}) {
+  // The panel dismisses itself when a click lands outside its element, so the
+  // combobox and menus the form opens portal into it rather than the document
+  // body.
+  const [panel, setPanel] = useState<HTMLDivElement | null>(null);
+
+  // A disabled trigger has nothing to open, and the popover would only put a
+  // click target around it.
+  if (disabled) {
+    return (
+      <Button
+        variant="neutral"
+        size="xs"
+        icon={<Pencil1Icon />}
+        aria-label={`Edit ${group.name} role`}
+        disabled
+        tip={disabledTip}
+      />
+    );
+  }
+
+  return (
+    <Popover
+      className="w-96"
+      placement="bottom-end"
+      offset={[0, 4]}
+      portal
+      asChild
+      button={({ open }) => (
+        <Button
+          variant="neutral"
+          size="xs"
+          icon={<Pencil1Icon />}
+          aria-label={`Edit ${group.name} role`}
+          focused={open}
+        />
+      )}
+    >
+      {({ close }) => (
+        <div ref={setPanel} data-testid="edit-group-role">
+          <PortalContainer container={panel}>
+            <EditGroupRoleForm
+              team={team}
+              group={group}
+              customRolesEnabled={customRolesEnabled}
+              onClose={() => close()}
+            />
+          </PortalContainer>
+        </div>
+      )}
+    </Popover>
+  );
+}
+
+export function EditGroupRoleForm({
   team,
   group,
   customRolesEnabled,
@@ -33,9 +105,8 @@ export function EditGroupRoleDialog({
   customRolesEnabled: boolean;
   onClose: () => void;
 }) {
-  // An unmapped group confers Developer, so that is what the dialog starts
-  // from rather than an empty selection.
-  const currentRole: RoleChoice = group.mapping?.role ?? "developer";
+  // An unmapped group confers nothing, so that is what the form starts from.
+  const currentRole: RoleChoice = group.mapping?.role ?? "noAccess";
   const currentCustomRoleIds = (group.mapping?.customRoles ?? []).map(
     (r) => r.id,
   );
@@ -45,6 +116,7 @@ export function EditGroupRoleDialog({
   const [isSaving, setIsSaving] = useState(false);
   const [didAttemptSave, setDidAttemptSave] = useState(false);
   const setMapping = useSetGroupRoleMapping(team.id, group.workosGroupId);
+  const deleteMapping = useDeleteGroupRoleMapping(team.id, group.workosGroupId);
 
   const canViewCustomRoles = useHasCustomRolePermission(
     team.id,
@@ -58,7 +130,7 @@ export function EditGroupRoleDialog({
       ? "You do not have permission to view custom roles."
       : undefined;
   // Only the selector below needs the team's roles, so they load with the
-  // dialog rather than with the group list behind it. The group rows name
+  // form rather than with the group list behind it. The group rows name
   // the roles they confer on their own.
   const { data: customRolesData } = useListCustomRoles(
     customRolesEnabled && canViewCustomRoles === true ? team.id : undefined,
@@ -69,6 +141,7 @@ export function EditGroupRoleDialog({
   const customRolesLoading =
     customDisabledReason === undefined && customRolesData === undefined;
   const roleOptions = [
+    { label: "No access", value: "noAccess" as const, disabled: false },
     { label: "Admin", value: "admin" as const, disabled: false },
     { label: "Developer", value: "developer" as const, disabled: false },
     {
@@ -93,17 +166,26 @@ export function EditGroupRoleDialog({
       customRolesLoading ||
       customRoles.length === 0);
 
+  const save = async () => {
+    // No access is the absence of a mapping, so it is the mapping coming off.
+    if (choice === "noAccess") {
+      await deleteMapping();
+    } else if (choice === "custom") {
+      await setMapping({ customRoles: selectedCustomRoleIds });
+    } else {
+      await setMapping({ role: choice });
+    }
+  };
+
   return (
-    <Modal
-      title="Edit group role"
-      description={
-        <>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h4>Edit group role</h4>
+        <p className="text-xs text-content-secondary">
           Change the role that members of{" "}
           <span className="font-semibold">{group.name}</span> receive.
-        </>
-      }
-      onClose={onClose}
-    >
+        </p>
+      </div>
       <form
         className="flex flex-col gap-4"
         onSubmit={async (e) => {
@@ -119,11 +201,7 @@ export function EditGroupRoleDialog({
           }
           setIsSaving(true);
           try {
-            if (choice === "custom") {
-              await setMapping({ customRoles: selectedCustomRoleIds });
-            } else {
-              await setMapping({ role: choice });
-            }
+            await save();
             onClose();
           } finally {
             setIsSaving(false);
@@ -154,6 +232,12 @@ export function EditGroupRoleDialog({
             }
           />
         </div>
+
+        {choice === "noAccess" && (
+          <p className="text-xs text-content-secondary">
+            This group will not grant access to this Convex team.
+          </p>
+        )}
 
         {choice === "custom" && (
           <div className="flex flex-col gap-1">
@@ -212,6 +296,6 @@ export function EditGroupRoleDialog({
           </Button>
         </div>
       </form>
-    </Modal>
+    </div>
   );
 }
