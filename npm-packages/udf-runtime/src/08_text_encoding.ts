@@ -16,6 +16,11 @@ class TextEncoder {
     return performOp("textEncoder/encode", text);
   }
   encodeInto(input: string, dest: Uint8Array) {
+    if (!(dest instanceof Uint8Array)) {
+      throw new TypeError(
+        "Failed to execute 'encodeInto' on 'TextEncoder': parameter 2 is not of type 'Uint8Array'.",
+      );
+    }
     const space = dest.length;
     const output = performOp("textEncoder/encodeInto", input, space);
     const { bytes, read, written } = output;
@@ -45,7 +50,7 @@ class TextDecoder {
       label,
     );
     if (error) {
-      throw new DOMException(error, "RangeError");
+      throw new RangeError(error);
     }
 
     this.#encoding = encoding;
@@ -77,12 +82,15 @@ class TextDecoder {
 
     try {
       if (!stream && this.#decoder === null) {
-        const { text } = performOp("textEncoder/decodeSingle", {
+        const { text, error } = performOp("textEncoder/decodeSingle", {
           bytes: copyBuffer(buffer),
           encoding: this.encoding,
           fatal: this.fatal,
           ignoreBOM: this.ignoreBOM,
         });
+        if (error) {
+          throw new TypeError(error);
+        }
         return text;
       }
 
@@ -95,12 +103,15 @@ class TextDecoder {
         );
       }
 
-      const { text } = performOp(
+      const { text, error } = performOp(
         "textEncoder/decode",
         copyBuffer(buffer),
         this.#decoder,
         stream,
       );
+      if (error) {
+        throw new TypeError(error);
+      }
       return text;
     } finally {
       if (!stream) {

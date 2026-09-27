@@ -1900,8 +1900,8 @@
     },
     "/teams/{team_id}/list_credits": {
       "get": {
-        "summary": "List a team's prepaid credits, ordered by the order they'll be drawn down.",
-        "description": "Every credit is returned in one response, so `pagination.hasMore` is always\nfalse. The envelope is shaped for paging so that adding it later is a\nbackwards-compatible change.",
+        "summary": "List a team's USD prepaid credits in Orb's drawdown order.",
+        "description": "Balances are dollar amounts; included usage in custom pricing units has\nseparate ledgers. Every credit is returned in one response, so\n`pagination.hasMore` is always false. The envelope is shaped for paging so\nthat adding it later is a backwards-compatible change.",
         "operationId": "list_credits",
         "parameters": [
           {
@@ -3522,6 +3522,7 @@
           "enableSSO",
           "disableSSO",
           "updateSSO",
+          "loginWithSSO",
           "enableDirectorySync",
           "disableDirectorySync",
           "updateDirectorySyncGroupMapping",
@@ -3882,6 +3883,13 @@
         "properties": {
           "newPlanId": {
             "type": "string"
+          },
+          "promoCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The promo code the user entered. Redeemed if it's an Orb coupon; a\npromo plan's code is already reflected in `new_plan_id`."
           }
         },
         "additionalProperties": false
@@ -4144,6 +4152,13 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "promoCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The promo code the user entered. Redeemed if it's an Orb coupon; a\npromo plan's code is already reflected in `plan_id`."
           }
         },
         "additionalProperties": false
@@ -6227,7 +6242,9 @@
         "type": "string",
         "enum": [
           "aws-us-east-1",
-          "aws-eu-west-1"
+          "aws-eu-west-1",
+          "aws-ca-central-1",
+          "aws-ap-southeast-2"
         ]
       },
       "RegisterOauthAppArgs": {

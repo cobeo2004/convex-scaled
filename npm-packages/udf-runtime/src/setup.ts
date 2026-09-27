@@ -2,7 +2,7 @@ import { setupURL } from "./00_url.js";
 import { setupCrypto } from "./00_crypto.js";
 import { setupDate } from "./00_date.js";
 import { setupMisc } from "./00_misc.js";
-import { setupTemporal } from "./00_temporal.js";
+import { patchDateTimeFormat, setupTemporal } from "./00_temporal.js";
 import { setupWeakRefs } from "./00_weakref.js";
 import { setupDOMException } from "./01_dom_exception.js";
 import { setupConsole } from "./02_console";
@@ -15,13 +15,12 @@ import { setupTextEncoding } from "./08_text_encoding.js";
 import { setupBlob } from "./09_file.js";
 import { setupHeaders } from "./20_headers.js";
 import { setupFormData } from "./21_formdata.js";
-import { requestFromConvexJson, setupRequest } from "./23_request.js";
-import { convexJsonFromResponse, setupResponse } from "./23_response.js";
+import { setupRequest } from "./23_request.js";
+import { setupResponse } from "./23_response.js";
 import { setupFetch } from "./26_fetch.js";
 import { setupPerformance } from "./27_performance.js";
 import { setupSourceMapping } from "./errors.js";
-import { throwUncatchableDeveloperError } from "./helpers.js";
-import { getBlob, storeBlob } from "./storage.js";
+import { setupJsSyscall } from "./js_syscall.js";
 import { setupStructuredClone } from "./02_structured_clone.js";
 
 /**
@@ -33,6 +32,7 @@ import { setupStructuredClone } from "./02_structured_clone.js";
 export function setup(global: any) {
   setupSourceMapping();
   setupDate(global);
+  patchDateTimeFormat(global, global.Date.now);
   // V8 installs Temporal when deserializing a context, after snapshot setup.
   global.Convex.setupTemporal = () => setupTemporal(global);
   // NB: It's important we call into `setupMisc` before the other setup functions
@@ -62,18 +62,5 @@ export function setup(global: any) {
   setupFetch(global);
   setupPerformance(global);
 
-  global.Convex.jsSyscall = (op: string, args: Record<string, any>) => {
-    switch (op) {
-      case "requestFromConvexJson":
-        return requestFromConvexJson(args as any);
-      case "convexJsonFromResponse":
-        return convexJsonFromResponse(args as any);
-      case "storage/storeBlob":
-        return storeBlob(args as any);
-      case "storage/getBlob":
-        return getBlob(args as any);
-      default:
-        return throwUncatchableDeveloperError(`Unknown JS syscall: ${op}`);
-    }
-  };
+  setupJsSyscall(global);
 }

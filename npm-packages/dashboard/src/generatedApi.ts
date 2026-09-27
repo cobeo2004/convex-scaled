@@ -1150,10 +1150,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List a team's prepaid credits, ordered by the order they'll be drawn down.
-         * @description Every credit is returned in one response, so `pagination.hasMore` is always
-         *     false. The envelope is shaped for paging so that adding it later is a
-         *     backwards-compatible change.
+         * List a team's USD prepaid credits in Orb's drawdown order.
+         * @description Balances are dollar amounts; included usage in custom pricing units has
+         *     separate ledgers. Every credit is returned in one response, so
+         *     `pagination.hasMore` is always false. The envelope is shaped for paging so
+         *     that adding it later is a backwards-compatible change.
          */
         get: operations["list_credits"];
         put?: never;
@@ -1915,7 +1916,7 @@ export interface components {
             referralCode: components["schemas"]["ReferralCode"];
         };
         /** @enum {string} */
-        AuditLogAction: "joinTeam" | "createTeam" | "updateTeam" | "deleteTeam" | "createProject" | "transferProject" | "receiveProject" | "updateProject" | "deleteProject" | "createProjectEnvironmentVariable" | "updateProjectEnvironmentVariable" | "deleteProjectEnvironmentVariable" | "createDeployment" | "deleteDeployment" | "inviteMember" | "cancelMemberInvitation" | "removeMember" | "updateMemberRole" | "updateMemberProjectRole" | "updatePaymentMethod" | "updateBillingContact" | "updateBillingAddress" | "createSubscription" | "resumeSubscription" | "cancelSubscription" | "changeSubscriptionPlan" | "createTeamAccessToken" | "updateTeamAccessToken" | "deleteTeamAccessToken" | "viewTeamAccessToken" | "createProjectAccessToken" | "updateProjectAccessToken" | "deleteProjectAccessToken" | "viewProjectAccessToken" | "createDeploymentAccessToken" | "updateDeploymentAccessToken" | "deleteDeploymentAccessToken" | "viewDeploymentAccessToken" | "createPersonalAccessTokenWithSsoAccess" | "createTeamDomain" | "deleteTeamDomain" | "createCustomDomain" | "deleteCustomDomain" | "startManualCloudBackup" | "restoreFromCloudBackup" | "configurePeriodicBackup" | "disablePeriodicBackup" | "deleteCloudBackup" | "disableTeamExceedingSpendingLimits" | "setSpendingLimit" | "applyReferralCode" | "createOAuthApplication" | "updateOAuthApplication" | "deleteOAuthApplication" | "verifyOAuthApplication" | "generateOAuthClientSecret" | "createWorkosTeam" | "createWorkosEnvironment" | "deleteWorkosEnvironment" | "retrieveWorkosEnvironmentCredentials" | "disconnectWorkosTeam" | "inviteWorkosTeamMember" | "createProjectWorkosEnvironment" | "deleteProjectWorkosEnvironment" | "retrieveProjectWorkosEnvironmentCredentials" | "enableSSO" | "disableSSO" | "updateSSO" | "enableDirectorySync" | "disableDirectorySync" | "updateDirectorySyncGroupMapping" | "deleteDirectorySyncGroupMapping" | "transferDeployment" | "receiveDeployment" | "updateDeployment" | "createCustomRole" | "updateCustomRole" | "deleteCustomRole";
+        AuditLogAction: "joinTeam" | "createTeam" | "updateTeam" | "deleteTeam" | "createProject" | "transferProject" | "receiveProject" | "updateProject" | "deleteProject" | "createProjectEnvironmentVariable" | "updateProjectEnvironmentVariable" | "deleteProjectEnvironmentVariable" | "createDeployment" | "deleteDeployment" | "inviteMember" | "cancelMemberInvitation" | "removeMember" | "updateMemberRole" | "updateMemberProjectRole" | "updatePaymentMethod" | "updateBillingContact" | "updateBillingAddress" | "createSubscription" | "resumeSubscription" | "cancelSubscription" | "changeSubscriptionPlan" | "createTeamAccessToken" | "updateTeamAccessToken" | "deleteTeamAccessToken" | "viewTeamAccessToken" | "createProjectAccessToken" | "updateProjectAccessToken" | "deleteProjectAccessToken" | "viewProjectAccessToken" | "createDeploymentAccessToken" | "updateDeploymentAccessToken" | "deleteDeploymentAccessToken" | "viewDeploymentAccessToken" | "createPersonalAccessTokenWithSsoAccess" | "createTeamDomain" | "deleteTeamDomain" | "createCustomDomain" | "deleteCustomDomain" | "startManualCloudBackup" | "restoreFromCloudBackup" | "configurePeriodicBackup" | "disablePeriodicBackup" | "deleteCloudBackup" | "disableTeamExceedingSpendingLimits" | "setSpendingLimit" | "applyReferralCode" | "createOAuthApplication" | "updateOAuthApplication" | "deleteOAuthApplication" | "verifyOAuthApplication" | "generateOAuthClientSecret" | "createWorkosTeam" | "createWorkosEnvironment" | "deleteWorkosEnvironment" | "retrieveWorkosEnvironmentCredentials" | "disconnectWorkosTeam" | "inviteWorkosTeamMember" | "createProjectWorkosEnvironment" | "deleteProjectWorkosEnvironment" | "retrieveProjectWorkosEnvironmentCredentials" | "enableSSO" | "disableSSO" | "updateSSO" | "loginWithSSO" | "enableDirectorySync" | "disableDirectorySync" | "updateDirectorySyncGroupMapping" | "deleteDirectorySyncGroupMapping" | "transferDeployment" | "receiveDeployment" | "updateDeployment" | "createCustomRole" | "updateCustomRole" | "deleteCustomRole";
         /** @description Represents the `ValidatedActor` equivalent for audit logs. This identifies
          *     who executed an AuditLogEvent */
         AuditLogActor: "system" | {
@@ -1997,6 +1998,9 @@ export interface components {
         };
         ChangeSubscriptionPlanArgs: {
             newPlanId: string;
+            /** @description The promo code the user entered. Redeemed if it's an Orb coupon; a
+             *     promo plan's code is already reflected in `new_plan_id`. */
+            promoCode?: string | null;
         };
         CheckOauthAppArgs: {
             clientId: string;
@@ -2068,6 +2072,9 @@ export interface components {
             disableThresholdCents?: number | null;
             /** Format: int64 */
             warningThresholdCents?: number | null;
+            /** @description The promo code the user entered. Redeemed if it's an Orb coupon; a
+             *     promo plan's code is already reflected in `plan_id`. */
+            promoCode?: string | null;
         };
         CreateTeamArgs: {
             name: components["schemas"]["ProposedTeamName"];
@@ -2694,7 +2701,7 @@ export interface components {
             referredBy?: null | components["schemas"]["TeamName"];
         };
         /** @enum {string} */
-        RegionName: "aws-us-east-1" | "aws-eu-west-1";
+        RegionName: "aws-us-east-1" | "aws-eu-west-1" | "aws-ca-central-1" | "aws-ap-southeast-2";
         RegisterOauthAppArgs: {
             appName: components["schemas"]["AppName"];
             redirectUris: string[];
